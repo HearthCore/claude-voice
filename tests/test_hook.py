@@ -94,3 +94,46 @@ def run():
     check("hooks.json entries are async", all(h["async"] is True and h["timeout"] == 10
           for ev in json.load(open(f"{ROOT}/hooks/hooks.json"))["hooks"].values() for g in ev for h in g["hooks"]))
     cap.shutdown()
+
+
+def run_creds():
+    got_a, got_b = [], []
+
+    class Target(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            got_b.append(self.headers.get("Authorization"))
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    tgt = http.server.ThreadingHTTPServer(("127.0.0.1", free_port()), Target)
+    threading.Thread(target=tgt.serve_forever, daemon=True).start()
+
+    class Redir(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            got_a.append(self.headers.get("Authorization"))
+            self.send_response(307)
+            self.send_header("Location", f"http://127.0.0.1:{tgt.server_address[1]}/v1/speak")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    red = http.server.ThreadingHTTPServer(("127.0.0.1", free_port()), Redir)
+    threading.Thread(target=red.serve_forever, daemon=True).start()
+    env = {**os.environ, "CLAUDE_VOICE_URL": f"http://127.0.0.1:{red.server_address[1]}", "CLAUDE_VOICE_TOKEN": "t" * 32,
+           "CLAUDE_VOICE_SYNC": "1", "CLAUDE_VOICE_STATE_DIR": tempfile.mkdtemp()}
+    run_hook({"hook_event_name": "Notification", "message": "Hallo."}, env)
+    check("hook: redirect target never sees Authorization", got_a == ["Bearer " + "t" * 32] and got_b == [])
+    check("creds_ok rules", speak.creds_ok("https://x.example") and speak.creds_ok("http://127.0.0.5:1") and speak.creds_ok("http://[::1]:1")
+          and speak.creds_ok("http://localhost") and not speak.creds_ok("http://10.0.0.1") and not speak.creds_ok("http://evil.example")
+          and not speak.creds_ok("ftp://127.0.0.1"))
+    p, dt = run_hook({"hook_event_name": "Notification", "message": "Hallo."},
+                     {**env, "CLAUDE_VOICE_URL": "http://10.255.255.1:9", "CLAUDE_VOICE_TIMEOUT": "3"})
+    check("hook: token + non-https remote -> silent no-op", p.returncode == 0 and dt < 1.0)
+    red.shutdown()
+    tgt.shutdown()

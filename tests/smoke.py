@@ -231,6 +231,7 @@ home = ["a", "b"]
     test_sidecar.run()
     import test_hook
     test_hook.run()
+    test_hook.run_creds()
     print(f"\n{len(PASSED)} checks passed")
 
 

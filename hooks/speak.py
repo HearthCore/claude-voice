@@ -5,6 +5,7 @@ Events: Stop (speaks `last_assistant_message`, falls back to parsing the transcr
 Env: CLAUDE_VOICE_URL, CLAUDE_VOICE_TOKEN, CLAUDE_VOICE_TARGET (default: relay route),
      CLAUDE_VOICE_MAX_CHARS (default 500), CLAUDE_VOICE_TIMEOUT (default 2), CLAUDE_VOICE_RETRIES (default 1)
 """
+import ipaddress
 import json
 import os
 import re
@@ -12,8 +13,32 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
 STATE_DIR = os.path.expanduser(os.environ.get("CLAUDE_VOICE_STATE_DIR", "~/.claude-voice"))
+
+
+def creds_ok(url: str) -> bool:
+    """Tokens only go over https, or to a loopback host."""
+    try:
+        u = urlsplit(url)
+        host = u.hostname or ""
+    except ValueError:
+        return False
+    if u.scheme == "https":
+        return True
+    try:
+        return u.scheme == "http" and (host == "localhost" or ipaddress.ip_address(host).is_loopback)
+    except ValueError:
+        return False
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **kw):   # a redirect must never carry the token along
+        return None
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
 
 
 def env_num(name: str, default, cast):
@@ -75,7 +100,7 @@ def post(url: str, token: str, payload: dict, timeout: float, retries: int) -> b
                                  else {"Content-Type": "application/json"})
     for attempt in range(retries + 1):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with OPENER.open(req, timeout=timeout) as r:
                 return 200 <= r.status < 300
         except urllib.error.HTTPError as e:
             if e.code < 500:       # 4xx: retrying will not help
@@ -120,6 +145,8 @@ def main() -> int:
     retries = max(0, env_num("CLAUDE_VOICE_RETRIES", "1", int))
     token = os.environ.get("CLAUDE_VOICE_TOKEN", "")
 
+    if token and not creds_ok(url):
+        return 0
     if hasattr(os, "fork") and not os.environ.get("CLAUDE_VOICE_SYNC"):
         if os.fork() != 0:       # parent returns immediately; session is never held up
             return 0
