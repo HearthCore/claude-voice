@@ -35,6 +35,9 @@ def sse_collect(base, device, out, stop):
 
 
 def main():
+    import re
+    relay_ver = re.search(r'^VERSION = "([^"]+)"', open(f"{ROOT}/relay/relay.py").read(), re.M).group(1)
+    check("plugin.json version == relay VERSION", json.load(open(f"{ROOT}/.claude-plugin/plugin.json"))["version"] == relay_ver)
     tmp = tempfile.mkdtemp()
     cfg = os.path.join(tmp, "relay.toml")
     open(cfg, "w").write('''

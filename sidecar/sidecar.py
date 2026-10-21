@@ -420,7 +420,9 @@ def main_loop(max_runs: int | None = None) -> None:
         try:
             run_once()
         except urllib.error.HTTPError as e:
-            log(f"relay HTTP {e.code} (check token / device name)", "warn")
+            hint = {401: "check CLAUDE_VOICE_TOKEN", 404: "check CLAUDE_VOICE_DEVICE / URL path"}.get(
+                e.code, "relay or proxy unavailable, retrying" if e.code >= 500 else "unexpected response")
+            log(f"relay HTTP {e.code} ({hint})", "warn")
         except (urllib.error.URLError, OSError, TimeoutError) as e:
             log(f"relay unreachable: {e}", "warn")
         except Exception as e:   # never die
