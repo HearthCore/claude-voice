@@ -1,0 +1,20 @@
+# systemd user service for the claude-voice sidecar (Omarchy/Arch, PipeWire).
+# Install: see README "Sidecar als systemd-User-Service".
+[Unit]
+Description=claude-voice sidecar (relay SSE -> TTS -> mpv)
+After=pipewire.service pipewire-pulse.service
+Wants=pipewire-pulse.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Secrets + config: chmod 600, never in the repo. Must set CLAUDE_VOICE_HOME (repo path).
+EnvironmentFile=%h/.config/claude-voice/sidecar.env
+ExecStart=/usr/bin/python3 -u ${CLAUDE_VOICE_HOME}/sidecar/sidecar.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

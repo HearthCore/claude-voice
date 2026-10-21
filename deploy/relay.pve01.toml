@@ -1,0 +1,24 @@
+# claude-voice relay config for PVE01 (v0.1: only the notebook sidecar is served).
+# Secrets NEVER go in here: CLAUDE_VOICE_TOKEN comes from .env.
+
+[server]
+host = "0.0.0.0"        # inside the container; published on 10.0.2.1:8787 (RELAY_BIND)
+port = 8787
+
+[defaults]
+route = "active"
+ttl_s = 45
+
+[routes]
+claude-code = "home"
+
+[devices.omarchy-notebook]
+caps = ["stream", "local-tts"]
+volume = 1.0
+latency_offset_ms = 0
+
+# v0.2 (audio-URL fan-out, docs/SPECS.md): homeassistant, smarttv – not served in v0.1.
+
+[groups]
+home   = ["omarchy-notebook"]
+mobile = ["omarchy-notebook"]
