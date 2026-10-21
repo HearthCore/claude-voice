@@ -59,6 +59,7 @@ SSE: `curl -N -H "Authorization: Bearer $TOKEN" "<url>/v1/stream?device=NAME"` m
 | `RELAY_BIND` | Bind-Adresse des publizierten Ports (Default `127.0.0.1`; hinter Reverse Proxy ggf. interne Bridge-IP) |
 | `CLAUDE_VOICE_CONFIG` / `_HOST` / `_PORT` | Alternativen zu `--config` / `--host` / `--port` |
 | `LOCAL_UNSAFE_NO_AUTH` | nur lokal auf Loopback, sonst Abbruch |
+| `CLAUDE_VOICE_LOG_LEVEL` | `off\|error\|warn\|info\|debug`, Default `info` (siehe „Logging & Datenschutz“) |
 
 ## Notebook (Omarchy): Sidecar als systemd-User-Service
 
@@ -88,6 +89,7 @@ journalctl --user -u claude-voice-sidecar -f      # Logs
 | `TTS_EXTRA_HEADERS` | – | `Name: Wert; Name2: Wert2` (Pangolin `P-Access-Token-Id` / `P-Access-Token`) |
 | `CLAUDE_VOICE_PLAYER_CMD` | – | Player-Override, sonst `mpv` → `ffplay` |
 | `CLAUDE_VOICE_PLAYER_DEADLINE_S` | `180` | Watchdog: hängender Player wird beendet |
+| `CLAUDE_VOICE_LOG_LEVEL` | `info` | `off\|error\|warn\|info\|debug` (siehe „Logging & Datenschutz“) |
 
 ## Hook / Plugin
 
@@ -106,6 +108,8 @@ Stop: spricht bevorzugt `last_assistant_message` (Transcript nur Fallback); Noti
 | `CLAUDE_VOICE_TIMEOUT` / `_RETRIES` | `2` / `1` | HTTP-Timeout (s) / Wiederholungen |
 | `CLAUDE_VOICE_STATE_DIR` | `~/.claude-voice` | lokale Mute-Flags |
 | `CLAUDE_VOICE_SYNC` | – | Debug: ohne fork/setsid, synchron |
+| `CLAUDE_VOICE_STOP_MODE` | `final` | `final`: Stop-Zwischenmeldungen bei laufenden Hintergrund-Subagents (`background_tasks`) nicht sprechen; `all`: jedes Stop sprechen |
+| `CLAUDE_VOICE_LOG_LEVEL` | `off` | `off\|error\|warn\|info\|debug`; JSON-Zeilen in `$CLAUDE_VOICE_STATE_DIR/hook.log` (0600, Rotation bei 256 KiB → `hook.log.1`) |
 
 Slash-Command: `/voice status | mute | unmute | speak <text>`.
 
@@ -124,6 +128,20 @@ Slash-Command: `/voice status | mute | unmute | speak <text>`.
 
 Hook in der Cloud: fork + `setsid`, das Kind leitet fd 0–2 auf `/dev/null` (sonst wartet Claude Code auf die Pipes: gemessen 5,26 s vorher, 0,05 s nachher); kein TTY nötig; `urllib` respektiert `HTTPS_PROXY`.
 
+## Logging & Datenschutz
+
+Eine Variable für alle Komponenten: `CLAUDE_VOICE_LOG_LEVEL` (Relay/Sidecar Default `info`, Hook Default `off`). Relay und Sidecar loggen nach stdout (journald/Docker), der Hook in `hook.log`.
+
+| Level | Inhalt |
+|---|---|
+| `off` | nichts (nur FATAL-Startfehler von Relay/Sidecar) |
+| `error` | Fehler |
+| `warn` | + Degradierung: TTS-Retry, Relay nicht erreichbar, 4xx/5xx, verworfene/abgelaufene Events, verdrängte Streams |
+| `info` | + Betrieb: Verbindungen, Event-ID, Gerät, Status, Zeichen**anzahl**, Requests. **Kein Nachrichtentext** |
+| `debug` | + vollständiger Inhalt: Hook-Input/Rohtext/bereinigter Text/Payload/POST-Ergebnis, Relay-Body und Zustellung, Sidecar-Text je Satz, TTS-Request (ohne Key/Header-Werte), Content-Type, TTFB, Player-Argv |
+
+Bei `debug` loggen Relay und Sidecar eine Warnung beim Start. Tokens, `Authorization`, `TTS_KEY` und `TTS_EXTRA_HEADERS`-Werte werden auf keinem Level geloggt (durch Test abgesichert).
+
 ## Sicherheit (Kurzfassung)
 
 Tokens, Keys und Extra-Header gehen nie über Klartext-http an Nicht-Loopback-Hosts; Redirects werden nie verfolgt (Hook, voicectl, Sidecar). Details und Grenzen: [docs/SPECS.md](docs/SPECS.md).
@@ -131,7 +149,7 @@ Tokens, Keys und Extra-Header gehen nie über Klartext-http an Nicht-Loopback-Ho
 ## Tests
 
 ```bash
-python3 tests/smoke.py      # 123 Checks: tests/test_relay.py, test_sidecar.py, test_hook.py
+python3 tests/smoke.py      # 150 Checks: tests/test_relay.py, test_sidecar.py, test_hook.py, test_logging.py
 ```
 
 Fake-TTS, tee-/Stub-Player, freie Ports; kein Netzwerk nötig. Repo-Agents: `.claude/agents/reviewer.md` (read-only), `scout.md` (haiku, read-only).

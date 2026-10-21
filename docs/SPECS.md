@@ -54,6 +54,7 @@ Alle Pfade zusätzlich unter `CLAUDE_VOICE_BASE_PATH` (Produktion `/speak`, z. B
 | Limits | Body 64 KiB, Text 4000, Felder ≤ 128, Ack-Status per Whitelist, `by_id` (1000) / History / Mutes begrenzt, max. 64 Streams, Socket-Timeout 30 s |
 | Fehler/Logs | generischer 500 ohne Interna; Steuerzeichen in Logs escaped; keine Tokens in Logs oder URLs |
 | Clients (Hook, voicectl, Sidecar) | Token/Keys/Extra-Header nie über Klartext-http an Nicht-Loopback-Hosts; Redirects nie verfolgt |
+| Logs | Nachrichtentext nur bei `CLAUDE_VOICE_LOG_LEVEL=debug`; Tokens, Keys und Extra-Header-Werte nie (Test); Hook-Log 0600, Rotation 256 KiB |
 | Hook | bereinigt Code, URLs, Tabellen; nur Assistant-Text, keine Dateiinhalte oder Tool-Outputs; blockiert nie |
 | TLS | terminiert Pangolin/Traefik |
 | Pangolin-Bypass | nur `PATH /speak/*` (nicht `/speak*`); Relay-Token ist dort die einzige Auth |
@@ -78,6 +79,7 @@ Alle Pfade zusätzlich unter `CLAUDE_VOICE_BASE_PATH` (Produktion `/speak`, z. B
 | Base-Path | im Relay (`CLAUDE_VOICE_BASE_PATH`) statt Proxy-Rewrite | kein Rewrite-Setup in Pangolin, Pfad-Traversal wird im Relay strikt behandelt |
 | Cloud-Aktivierung | `CLAUDE_CODE_PLUGIN_DIRS` | Marketplace-Einträge aus `.claude/settings.json` greifen in Cloud-Sessions nicht |
 | Cloud-Token | bevorzugt Network Secret für die Relay-Domain (`Authorization: Bearer`), alternativ Env `CLAUDE_VOICE_TOKEN` | Network Secret: Token gelangt nie in die VM |
+| Zwischenmeldungen | Stop bei laufenden Hintergrund-Subagents wird standardmäßig nicht gesprochen (`background_tasks` im Stop-Input, gemessen); `CLAUDE_VOICE_STOP_MODE=all` spricht alles. Tool-Aufruf-Zusammenfassungen: Roadmap | Claude beendet den Turn mit Zwischenstand und wird später geweckt; nur das finale Stop soll vorgelesen werden |
 | Cloud-Hook | fork + `setsid`, fd 0–2 auf `/dev/null`, `async: true` | sonst wartet Claude Code auf Pipes (5,26 s statt 0,05 s) |
 
 ## Roadmap
@@ -86,5 +88,6 @@ Alle Pfade zusätzlich unter `CLAUDE_VOICE_BASE_PATH` (Produktion `/speak`, z. B
 - **Presence:** `home` nur bei Anwesenheit (HA), sonst Fallback `active`.
 - **Barge-in:** neues Event bricht laufende Wiedergabe derselben Session ab.
 - **Per-Device-Tokens:** ein Token je Gerät statt gemeinsamem Token.
+- **Aktivitäts-Zusammenfassung:** Tool-Aufrufe/Zwischenstände sammeln und gebündelt zusammengefasst sprechen (opt-in).
 - **Ack-basierte Redelivery:** `delivered` erst nach Ack, sonst erneut zustellen (innerhalb TTL).
 - ~~Claude-Code-Cloud-Environment~~ — **erledigt in v0.1** (`deploy/cloud-env-setup.sh`, siehe README).
