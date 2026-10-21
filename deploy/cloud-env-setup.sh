@@ -8,6 +8,9 @@
 # Activation: set CLAUDE_CODE_PLUGIN_DIRS=~/.claude-plugins/claude-voice in the
 # environment variables (the env equivalent of --plugin-dir, loads as claude-voice@inline).
 #
+# Later updates need no change of this (cached) script: hooks/self_update.py moves the detached checkout to
+# CLAUDE_VOICE_REF at session start, or on demand via /claude-voice:voice update <tag>.
+#
 # Env (all optional, no secrets in this file):
 #   CLAUDE_VOICE_REPO        default https://github.com/HearthCore/claude-voice.git
 #   CLAUDE_VOICE_REF         branch or tag, default main. Recommended: a release tag (e.g. v0.1.0),

@@ -91,8 +91,19 @@ def run():
     check("invalid TIMEOUT/RETRIES -> exit 0", p.returncode == 0)
     p = subprocess.run([sys.executable, f"{ROOT}/hooks/speak.py"], env=env, input=b"\xff not json", capture_output=True, timeout=10)
     check("garbage stdin -> exit 0", p.returncode == 0)
-    check("hooks.json entries are async", all(h["async"] is True and h["timeout"] == 10
-          for ev in json.load(open(f"{ROOT}/hooks/hooks.json"))["hooks"].values() for g in ev for h in g["hooks"]))
+    check("hooks.json entries are async", all(h["async"] is True and h["timeout"] == (90 if name == "SessionStart" else 10)
+          for name, ev in json.load(open(f"{ROOT}/hooks/hooks.json"))["hooks"].items() for g in ev for h in g["hooks"]))
+    # run every hooks.json command the way Claude Code does (shell, CLAUDE_PLUGIN_ROOT set) with `|| true` stripped:
+    # the referenced script must exist and run (a quoting mistake would otherwise be masked by `|| true`)
+    ok = []
+    for name, ev in json.load(open(f"{ROOT}/hooks/hooks.json"))["hooks"].items():
+        for g in ev:
+            for h in g["hooks"]:
+                cmd = h["command"].removesuffix(" || true")
+                p = subprocess.run(["sh", "-c", cmd], input=json.dumps({"hook_event_name": name}).encode(), capture_output=True, timeout=30,
+                                   env={**env, "CLAUDE_PLUGIN_ROOT": ROOT, "CLAUDE_VOICE_AUTO_UPDATE": "0"})
+                ok.append((name, p.returncode, b"can't open file" not in p.stderr))
+    check("every hooks.json command resolves to an existing script and exits 0", ok and all(rc == 0 and found for _, rc, found in ok))
 
     # log levels: off writes nothing; info = decision + metadata + count; debug adds content + payload + POST result
     def hook_log(level, payload):

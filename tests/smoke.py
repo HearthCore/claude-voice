@@ -240,6 +240,8 @@ home = ["a", "b"]
     test_hook.run_round5()
     import test_logging
     test_logging.run()
+    import test_update
+    test_update.run()
     print(f"\n{len(PASSED)} checks passed")
 
 
