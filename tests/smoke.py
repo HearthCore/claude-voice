@@ -226,6 +226,7 @@ home = ["a", "b"]
     import test_relay
     test_relay.run()
     test_relay.run_base_path()
+    test_relay.run_hardening()
     import test_sidecar
     test_sidecar.run()
     import test_hook

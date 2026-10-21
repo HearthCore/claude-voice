@@ -153,3 +153,91 @@ def run_base_path():
         check("hook posting to base+prefix delivers event", wait_for(lambda: len(got) == 1 and got[0]["text"] == "Hallo Prefix."))
     finally:
         srv.shutdown()
+
+
+def serve(st, **kw):
+    srv = relay.ThreadingHTTPServer(("127.0.0.1", 0), relay.make_handler(st, [TOKEN], False, **kw))
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1]
+
+
+def run_hardening():
+    import contextlib
+    import io
+    relay.KEEPALIVE_S = 1
+    cfg = {"devices": {"a": {}, "b": {}}, "groups": {}, "defaults": {"route": "active"}}
+    st = relay.State(cfg)
+    srv, port = serve(st, max_streams=2)
+    base = f"http://127.0.0.1:{port}"
+    auth = f"Authorization: Bearer {TOKEN}\r\n"
+    try:
+        # R1 activity = connect/delivery/ack, not idle loop
+        ga, gb = [], []
+        open_stream(base, "a", ga)
+        wait_for(lambda: st.connections["a"] == 1)
+        time.sleep(0.3)
+        open_stream(base, "b", gb)
+        wait_for(lambda: st.connections["b"] == 1)
+        time.sleep(3.2)
+        res = req(base, "POST", "/v1/speak", {"text": "wer?", "ttl_s": 30})[1]
+        check("later-connected device stays 'active' over idle", res["events"][0]["device"] == "b")
+        check("event carries expires_in_s", wait_for(lambda: len(gb) == 1) and 0 < gb[0]["expires_in_s"] <= 30)
+        # R8 stream cap (a, b hold both slots)
+        sk = socket.create_connection(("127.0.0.1", port), timeout=3)
+        sk.sendall(f"GET /v1/stream?device=a HTTP/1.1\r\nHost: x\r\n{auth}\r\n".encode())
+        check("stream cap -> 503", b" 503 " in sk.recv(200))
+        sk.close()
+    finally:
+        srv.shutdown()
+
+    st = relay.State({"devices": {"a": {}}, "groups": {}, "defaults": {"route": "a"}})
+    srv, port = serve(st)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        # R2 full queue: requeue never blocks, event dropped
+        for _ in range(100):
+            st.speak({"text": "x"})
+        ev = {"id": "evt_zz", "_expires": time.time() + 99}
+        st.by_id["evt_zz"] = {"id": "evt_zz", "device": "a", "status": "queued", "ts": 0}
+        t = threading.Thread(target=st.requeue, args=("a", ev), daemon=True)
+        t.start()
+        t.join(3)
+        check("requeue into full queue does not block, marks dropped", not t.is_alive() and st.by_id["evt_zz"]["status"] == "dropped:queue_full")
+        # R3 purge expired before enqueue
+        st = relay.State({"devices": {"a": {}}, "groups": {}, "defaults": {"route": "a"}})
+        for _ in range(100):
+            st.speak({"text": "x", "ttl_s": 1})
+        time.sleep(1.2)
+        r = st.speak({"text": "neu"})
+        old = [x for x in st.history if x["status"] == "expired"]
+        check("expired events purged, new event queued", r["events"][0]["status"] == "queued" and len(old) == 100)
+        # R4 caps
+        check("overlong session_id -> 400", req(base, "POST", "/v1/speak", {"text": "x", "session_id": "s" * 129})[0] == 400)
+        check("unknown ack status -> 400", req(base, "POST", "/v1/ack", {"id": "x", "device": "a", "status": "evil"})[0] == 400)
+        code, _ = req(base, "POST", "/v1/speak", {"text": "x", "target": "geheim-ziel"})
+        pl = b'{"text":"x","target":"geheimzz"}'
+        raw_resp = raw(port, f"POST /v1/speak HTTP/1.1\r\nHost: x\r\n{auth}Content-Length: {len(pl)}\r\n\r\n".encode() + pl)
+        check("404 does not echo target", code == 404 and b"geheimzz" not in raw_resp and b" 404 " in raw_resp)
+        st2 = relay.State({"devices": {"a": {}}, "groups": {}})
+        for i in range(1100):
+            st2.set_mute("session", f"s{i}", True)
+        check("muted sessions capped, oldest evicted", len(st2.muted["session"]) == 1000 and "s0" not in st2.muted["session"]
+              and "s1099" in st2.muted["session"])
+        # R5 path handling
+        for line in ("GET //x/v1/state HTTP/1.1", "GET /v1/state;x HTTP/1.1", "GET //[ HTTP/1.1", "GET /v1/state%00 HTTP/1.1"):
+            out = raw(port, f"{line}\r\nHost: x\r\n{auth}Connection: close\r\n\r\n".encode())
+            check(f"path {line.split()[1]!r} never 200/500", out[:12] != b"HTTP/1.1 200" and b" 500 " not in out[:20] and out.startswith(b"HTTP/"))
+        # R6 error responses close the connection
+        t0 = time.time()
+        out = raw(port, b"GET /v1/state HTTP/1.1\r\nHost: x\r\n\r\n", timeout=5)
+        check("401 closes connection", b" 401 " in out and time.time() - t0 < 2 and b"onnection: close" in out)
+        # R7 log sanitising
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            raw(port, b"GET /v1/\x1b[31mevil HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            time.sleep(0.2)
+        check("control chars escaped in logs", "\x1b" not in buf.getvalue() and "\\x1b" in buf.getvalue())
+    finally:
+        srv.shutdown()
+        relay.KEEPALIVE_S = 15

@@ -18,15 +18,20 @@ import threading
 import time
 import tomllib
 import uuid
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs
 
 VERSION = "0.1.0"
 KEEPALIVE_S = 15
 MAX_BODY = 64 * 1024
 MAX_TEXT = 4000
 MAX_TRACKED = 1000
+MAX_MUTED_SESSIONS = 1000
+MAX_FIELD = 128
+MAX_STREAMS = 64
+ACK_STATUSES = {"delivered", "played", "tts_error", "player_error", "expired", "acked"}
 
 
 def log(msg: str) -> None:
@@ -58,6 +63,7 @@ class State:
         self.muted: dict[str, set[str]] = {"all": set(), "session": set(), "device": set(), "group": set()}
         self.history: collections.deque = collections.deque(maxlen=200)
         self.by_id: collections.OrderedDict[str, dict] = collections.OrderedDict()
+        self.session_order: collections.deque = collections.deque()
         self.gen: dict[str, int] = collections.defaultdict(int)
 
     # ---- resolution -------------------------------------------------
@@ -100,7 +106,43 @@ class State:
 
     @staticmethod
     def _opt_str(v) -> str | None:
-        return None if v is None or v == "" else str(v)
+        if v is None or v == "":
+            return None
+        v = str(v)
+        if len(v) > MAX_FIELD:
+            raise ValueError(f"field longer than {MAX_FIELD} chars")
+        return v
+
+    def _purge_expired(self, dev: str) -> None:
+        q, now = self.queues[dev], time.time()
+        with q.mutex:
+            gone = [e for e in q.queue if e["_expires"] <= now]
+            if not gone:
+                return
+            keep = [e for e in q.queue if e["_expires"] > now]
+            q.queue.clear()
+            q.queue.extend(keep)
+            q.not_full.notify_all()
+        for e in gone:
+            rec = self.by_id.get(e["id"])
+            if rec:
+                rec["status"] = "expired"
+
+    def requeue(self, dev: str, ev: dict) -> None:
+        """Put an undelivered event back at the head without ever blocking; drop if the queue is full."""
+        q = self.queues[dev]
+        with self.lock, q.mutex:
+            if len(q.queue) < q.maxsize:
+                q.queue.appendleft(ev)
+                q.not_empty.notify()
+                return
+        self.set_status(ev["id"], "dropped:queue_full")
+
+    def set_status(self, evid: str, status: str) -> None:
+        with self.lock:
+            rec = self.by_id.get(evid)
+            if rec:
+                rec["status"] = status
 
     def _speak(self, body: dict) -> dict:
         text = str(body.get("text", "")).strip()
@@ -108,7 +150,7 @@ class State:
             raise ValueError("text required")
         text = text[:MAX_TEXT]
         source = self._opt_str(body.get("source"))
-        target = str(body.get("target") or self.routes.get(source or "", self.default_route))
+        target = self._opt_str(body.get("target")) or self.routes.get(source or "", self.default_route)
         session_id = self._opt_str(body.get("session_id"))
         priority = self._opt_str(body.get("priority")) or "normal"
         play_at = self._opt_str(body.get("play_at"))
@@ -120,7 +162,7 @@ class State:
         now = time.time()
         devices = self.resolve(target)
         if not devices:
-            raise LookupError(f"target {target!r} resolves to no device (unknown or none connected)")
+            raise LookupError("unknown target or no device connected")
         group_names = [g for g, m in self.groups.items() if g == target]
         result = []
         for dev in devices:
@@ -151,7 +193,11 @@ class State:
                 try:
                     self.queues[dev].put_nowait(ev)
                 except queue.Full:
-                    rec["status"] = "dropped:queue_full"
+                    self._purge_expired(dev)
+                    try:
+                        self.queues[dev].put_nowait(ev)
+                    except queue.Full:
+                        rec["status"] = "dropped:queue_full"
             result.append({"id": ev["id"], "device": dev, "status": rec["status"]})
         return {"target": target, "events": result}
 
@@ -170,6 +216,8 @@ class State:
     def _set_mute(self, scope: str, ident: str, muted: bool) -> None:
         if scope not in self.muted:
             raise ValueError("scope must be all|session|device|group")
+        if len(ident) > MAX_FIELD:
+            raise ValueError(f"id longer than {MAX_FIELD} chars")
         if scope == "all":
             ident = "*"
         if scope == "device" and ident not in self.devices:
@@ -177,6 +225,12 @@ class State:
         if scope == "group" and ident not in self.groups:
             raise ValueError(f"unknown group {ident!r}")
         (self.muted[scope].add if muted else self.muted[scope].discard)(ident)
+        if scope == "session" and muted:
+            if ident in self.session_order:
+                self.session_order.remove(ident)
+            self.session_order.append(ident)
+            while len(self.session_order) > MAX_MUTED_SESSIONS:
+                self.muted["session"].discard(self.session_order.popleft())
 
     def muted_view(self) -> dict:
         with self.lock:
@@ -226,14 +280,17 @@ def norm_base_path(v) -> str:
     return "/" + v if v else ""
 
 
-def make_handler(state: State, tokens: list[str], no_auth: bool, base_path: str = ""):
+def make_handler(state: State, tokens: list[str], no_auth: bool, base_path: str = "", max_streams: int = MAX_STREAMS):
+    streams = threading.BoundedSemaphore(max_streams)
+
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = f"claude-voice-relay/{VERSION}"
         timeout = 30   # socket timeout: half-open peers and slowloris
 
         def log_message(self, fmt, *args):  # never log headers/tokens
-            log(f"{self.client_address[0]} {fmt % args}")
+            msg = (fmt % args).encode("unicode_escape").decode("ascii")   # no control chars in logs
+            log(f"{self.client_address[0]} {msg}")
 
         # -- helpers
         def _json(self, code: int, obj: dict) -> None:
@@ -241,6 +298,9 @@ def make_handler(state: State, tokens: list[str], no_auth: bool, base_path: str 
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
+            if code >= 400:
+                self.send_header("Connection", "close")
+                self.close_connection = True   # request body may be unread
             self.end_headers()
             self.wfile.write(data)
 
@@ -275,6 +335,8 @@ def make_handler(state: State, tokens: list[str], no_auth: bool, base_path: str 
                 self.send_response(401)
                 self.send_header("WWW-Authenticate", "Bearer")
                 self.send_header("Content-Length", "0")
+                self.send_header("Connection", "close")
+                self.close_connection = True
                 self.end_headers()
                 return False
             return True
@@ -309,14 +371,22 @@ def make_handler(state: State, tokens: list[str], no_auth: bool, base_path: str 
             self._safe(self._post)
 
         def _url(self):
-            u = urlparse(self.path)
-            p = u.path
-            if base_path and (p == base_path or p.startswith(base_path + "/")):
-                p = p[len(base_path):] or "/"
-            return u._replace(path=p)
+            """Split the raw request target by hand; None if it must not be routed."""
+            raw = self.path
+            path, _, query = raw.partition("?")
+            if not path.startswith("/") or path.startswith("//") or ";" in path:
+                return None
+            if base_path and (path == base_path or path.startswith(base_path + "/")):
+                path = path[len(base_path):] or "/"
+            return SimpleNamespace(path=path, query=query)
+
+        def _bad_path(self) -> None:
+            self._json(400, {"error": "bad request path"})
 
         def _get(self):
             u = self._url()
+            if u is None:
+                return self._bad_path()
             if u.path == "/healthz":
                 return self._json(200, {"ok": True, "version": VERSION})
             if not self._guard():
@@ -326,20 +396,27 @@ def make_handler(state: State, tokens: list[str], no_auth: bool, base_path: str 
             if u.path == "/v1/stream":
                 dev = (parse_qs(u.query).get("device") or [""])[0]
                 if dev not in state.devices:
-                    return self._json(404, {"error": f"unknown device {dev!r}"})
+                    return self._json(404, {"error": "unknown device"})
                 return self._stream(dev)
             self._json(404, {"error": "not found"})
 
         def _post(self):
+            u = self._url()
+            if u is None:
+                return self._bad_path()
             if not self._guard():
                 return
-            u = self._url()
             try:
                 body = self._body()
                 if u.path == "/v1/speak":
                     return self._json(202, state.speak(body))
                 if u.path == "/v1/ack":
-                    ok = state.ack(str(body.get("id")), str(body.get("device")), str(body.get("status", "acked")))
+                    status = str(body.get("status", "acked"))
+                    if status not in ACK_STATUSES:
+                        raise ValueError("unknown ack status")
+                    ok = state.ack(str(body.get("id")), str(body.get("device")), status)
+                    if ok:
+                        state.touch(str(body.get("device")))
                     return self._json(200 if ok else 404, {"ok": ok})
                 if u.path == "/v1/mute":
                     state.set_mute(str(body.get("scope", "")), str(body.get("id", "")), bool(body.get("muted", True)))
@@ -351,6 +428,14 @@ def make_handler(state: State, tokens: list[str], no_auth: bool, base_path: str 
             self._json(404, {"error": "not found"})
 
         def _stream(self, dev: str) -> None:
+            if not streams.acquire(blocking=False):
+                return self._json(503, {"error": "too many streams"})
+            try:
+                self._stream_locked(dev)
+            finally:
+                streams.release()
+
+        def _stream_locked(self, dev: str) -> None:
             self._streaming = True
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -369,25 +454,25 @@ def make_handler(state: State, tokens: list[str], no_auth: bool, base_path: str 
                     try:
                         ev = q.get(timeout=1)
                     except queue.Empty:
-                        state.touch(dev)
                         if time.monotonic() - last_write >= KEEPALIVE_S:
                             self.wfile.write(b": keepalive\n\n")
                             self.wfile.flush()
                             last_write = time.monotonic()
                         continue
                     if state.superseded(dev, gen):
-                        q.put(ev)
+                        state.requeue(dev, ev)
                         break
                     if time.time() > ev["_expires"]:
                         state.ack(ev["id"], dev, "expired")
                         continue
                     out = {k: v for k, v in ev.items() if not k.startswith("_")}
+                    out["expires_in_s"] = round(max(0.0, ev["_expires"] - time.time()), 3)
                     payload = f"id: {ev['id']}\nevent: speak\ndata: {json.dumps(out)}\n\n".encode()
                     try:
                         self.wfile.write(payload)
                         self.wfile.flush()
                     except OSError:
-                        q.put(ev)  # not delivered: keep for reconnect (TTL still applies)
+                        state.requeue(dev, ev)  # not delivered: keep for reconnect (TTL still applies)
                         raise
                     last_write = time.monotonic()
                     state.ack(ev["id"], dev, "delivered")
