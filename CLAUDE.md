@@ -7,7 +7,6 @@
 - Der Hook (`hooks/speak.py`) darf Claude Code nie blockieren oder mit Fehlercode beenden.
 - Relay-Startregeln (Token Pflicht, `LOCAL_UNSAFE_NO_AUTH` nur Loopback) nicht aufweichen.
 - Spezifikation, Entscheidungen, Roadmap: `docs/SPECS.md`. Änderungen am Event-Schema dort nachziehen.
-- Produktion: Relay in Docker auf PVE01 (`/home/timo.goetzken/claude-voice`, Container `claude-voice-relay`), öffentlich `https://vox.goetzken.dev/speak`. Update: `git pull --ff-only && docker compose up -d --build`.
-- Die Pangolin-Bypass-Regel muss `ACCEPT PATH /speak/*` bleiben (nicht `/speak*`, sonst wird `/speakers…` offen).
-- Den Base-Path (`/speak`) behandelt das Relay selbst (`CLAUDE_VOICE_BASE_PATH`); in Pangolin kein Rewrite.
+- Repo ist öffentlich: keine internen Hostnamen, IPs, Pfade oder Proxy-Interna in versionierte Dateien. Betriebsdetails stehen in `docs/OPERATIONS.local.md` (git-ignoriert, nur lokal).
+- Produktion: Relay in Docker hinter Reverse Proxy unter Pfad-Präfix; Bypass-Regel nur `<präfix>/*`; Base-Path behandelt das Relay selbst (`CLAUDE_VOICE_BASE_PATH`), im Proxy kein Rewrite. Update: `git pull --ff-only && docker compose up -d --build`.
 - Nächste Schritte: v0.2 Audio-Fan-out (HA/TV), siehe Roadmap.

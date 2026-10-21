@@ -28,28 +28,26 @@ python3 tools/voicectl.py speak "Hallo Timo" --target omarchy-notebook
 
 `LOCAL_UNSAFE_NO_AUTH=true` wird **verweigert**, sobald der Host nicht Loopback ist. Ohne Token startet das Relay nicht (Token ≥ 16 Zeichen).
 
-## Produktion (Ist-Zustand)
+## Produktion (Docker hinter Reverse Proxy)
 
-| Komponente | Wert |
+| Komponente | Empfehlung |
 |---|---|
-| Relay | Docker auf PVE01, Repo `/home/timo.goetzken/claude-voice`, Container `claude-voice-relay` |
+| Relay | Docker (`compose.yaml`), Container `claude-voice-relay` |
 | Härtung | `restart: unless-stopped`, `read_only`, `cap_drop: ALL`, `init`, `mem_limit 128m`, `pids_limit 128`, Log-Rotation |
-| Port | `10.0.2.1:8787` (`RELAY_BIND`, Pangolin-Konvention auf PVE01) |
-| Config | `relay/relay.toml` aus `deploy/relay.pve01.toml` (nur `omarchy-notebook` aktiv); `.env` (chmod 600) mit Token, `CLAUDE_VOICE_BASE_PATH=/speak`, `RELAY_BIND` |
-| Öffentliche URL | `https://vox.goetzken.dev/speak` (nutzt die bestehende vox-Pangolin-Resource) |
-| Pangolin | Target `10.0.2.1:8787`, Site PVE01, Pfad-Präfix `/speak`, **kein Rewrite** (Relay entfernt den Base-Path selbst) |
-| Access-Regel | in der vox-Resource-Policy: `ACCEPT PATH /speak/*` (umgeht Pangolin-Header-Auth; für `/speak/*` ist der Relay-Bearer-Token die einzige Auth) |
-| TTS | `https://vox.goetzken.dev/v1`, Modell `sopro`, Stimme `timo_de` (weitere: jarvis, friday, sophie, beth, timo_en …), Pangolin-Header-Auth via `TTS_EXTRA_HEADERS` |
+| Port | `RELAY_BIND:8787`: nur intern binden (Loopback oder interne Bridge-IP), nie direkt öffentlich |
+| Config | `relay/relay.toml` aus `deploy/relay.production.toml`; `.env` (chmod 600) mit Token, optional `CLAUDE_VOICE_BASE_PATH`, `RELAY_BIND` |
+| TLS | terminiert der Reverse Proxy (z. B. Pangolin/Traefik) |
+| Pfad-Präfix | Relay kann unter einem Präfix (z. B. `/speak`) auf einer geteilten Domain laufen: Proxy-Target mit Prefix-Match, **kein Rewrite**, das Relay entfernt `CLAUDE_VOICE_BASE_PATH` selbst |
+| Proxy-Auth | Liegt die Domain hinter Proxy-Auth, eine Bypass-Regel **nur** für `<präfix>/*` anlegen (nicht `<präfix>*`, das öffnet auch `<präfix>ers…`). Dann ist der Relay-Bearer-Token die einzige Auth für diesen Pfad |
 
-Regel muss `/speak/*` bleiben, **nicht** `/speak*` (würde auch `/speakers…` öffnen).
-Geprüft: `/speak/healthz` 200 ohne Token; ohne/mit falschem Token 401; mit Token 200; `/speak/../v1/models`, `%2e%2e`, `/speakers` → 401 (vox bleibt geschützt).
-SSE durch Traefik/Pangolin: Keepalives exakt alle 15 s, kein Buffering (Traefik `readTimeout` 30 m / `idleTimeout` 5 m unkritisch dank Keepalive).
+Nach dem Deploy prüfen: `<url>/healthz` 200 ohne Token; ohne/mit falschem Token 401; mit Token 200; `<präfix>/../…` und `%2e%2e` dürfen nicht am Proxy-Schutz vorbeikommen.
+SSE: `curl -N -H "Authorization: Bearer $TOKEN" "<url>/v1/stream?device=NAME"` muss `: keepalive` im 15-s-Takt zeigen (kein Response-Buffering, Idle-Timeout > 15 s).
 
 **Update:** `git pull --ff-only && docker compose up -d --build`
-**Reboot:** docker + containerd sind enabled, der Container startet selbst (noch nicht per echtem Reboot getestet).
+**Reboot:** Container startet mit Docker selbst (`unless-stopped`).
 **Zustand** (Mutes, Queues) liegt nur im Speicher und geht beim Neustart verloren (gewollt, TTL 45 s).
 
-**TTS-Wahl:** vox streamt echt (erstes Byte 0,25–0,9 s) und liefert mit `stream=true` immer `audio/pcm` 24 kHz s16le mono. LiteLLM (`llm.goetzken.dev/v1`) bedient `sopro` zwar auch, streamt aber nur scheinbar (erstes Byte ~3,6 s) und liefert ~50 % 502 → nicht verwendet. Der Sidecar wiederholt 5xx vor dem ersten Byte (`TTS_RETRIES`).
+**TTS:** Ein OpenAI-kompatibler Server mit echtem Streaming ist entscheidend für die Latenz (erstes Byte < 1 s). Manche Server liefern bei `stream=true` immer `audio/pcm` (24 kHz s16le mono), egal welches `response_format`; der Sidecar wählt den Player deshalb nach `Content-Type`. Gateways, die erst komplett rendern, „streamen“ nur scheinbar. Der Sidecar wiederholt 5xx vor dem ersten Byte (`TTS_RETRIES`).
 
 ### Relay-Env (`.env`)
 
@@ -58,7 +56,7 @@ SSE durch Traefik/Pangolin: Keepalives exakt alle 15 s, kein Buffering (Traefik 
 | `CLAUDE_VOICE_TOKEN` | Bearer-Token (`openssl rand -hex 32`), nie committen |
 | `CLAUDE_VOICE_TOKENS` | Komma-Liste für Rotation (`neu,alt`) |
 | `CLAUDE_VOICE_BASE_PATH` | Pfad-Präfix hinter Shared-Proxy (Produktion `/speak`); auch `[server] base_path` in der TOML |
-| `RELAY_BIND` | Bind-Adresse des publizierten Ports (Default `127.0.0.1`, PVE01 `10.0.2.1`) |
+| `RELAY_BIND` | Bind-Adresse des publizierten Ports (Default `127.0.0.1`; hinter Reverse Proxy ggf. interne Bridge-IP) |
 | `CLAUDE_VOICE_CONFIG` / `_HOST` / `_PORT` | Alternativen zu `--config` / `--host` / `--port` |
 | `LOCAL_UNSAFE_NO_AUTH` | nur lokal auf Loopback, sonst Abbruch |
 
@@ -79,10 +77,10 @@ journalctl --user -u claude-voice-sidecar -f      # Logs
 | Variable | Default | Bedeutung |
 |---|---|---|
 | `CLAUDE_VOICE_HOME` | – | Repo-Pfad (nur für die systemd-Unit) |
-| `CLAUDE_VOICE_URL` / `_TOKEN` | – | Relay (Produktion `https://vox.goetzken.dev/speak`) |
+| `CLAUDE_VOICE_URL` / `_TOKEN` | – | Relay-URL inkl. Präfix, z. B. `https://relay.example.com/speak` |
 | `CLAUDE_VOICE_DEVICE` | – (Pflicht) | Gerätename wie in der Relay-Config |
 | `TTS_URL` | `http://127.0.0.1:8880/v1` | OpenAI-kompatibles TTS |
-| `TTS_MODEL` / `TTS_VOICE` | `kokoro` / `af_heart` | Produktion `sopro` / `timo_de` |
+| `TTS_MODEL` / `TTS_VOICE` | `kokoro` / `af_heart` | Modell/Stimme des TTS-Servers |
 | `TTS_FORMAT` | `pcm` | `pcm\|mp3\|wav\|opus`; Player-Wahl nach `Content-Type` der Antwort |
 | `TTS_PCM_RATE` / `TTS_PCM_CHANNELS` | `24000` / `1` | Raw-PCM s16le |
 | `TTS_RETRIES` | `2` | Retries bei 5xx/Verbindungsfehler vor dem ersten Byte |
@@ -113,15 +111,15 @@ Slash-Command: `/voice status | mute | unmute | speak <text>`.
 
 **Mute:** Client sofort/offline: `voicectl local mute [--session SID]`; Relay: `voicectl mute --scope all|session|device|group --id X`.
 
-## Cloud (claude.ai Environment „GDev")
+## Cloud (claude.ai Environment)
 
 | Schritt | Wert |
 |---|---|
-| Setup-Script | Inhalt von `deploy/cloud-env-setup.sh` (läuft als root vor Claude Code; endet immer mit Exit 0; idempotenter Clone/Fetch nach `~/.claude-plugins/claude-voice`; Environment-Cache ~7 Tage, Updates kommen beim Cache-Rebuild) |
+| Setup-Script | `curl -fsSL https://raw.githubusercontent.com/HearthCore/claude-voice/<Tag>/deploy/cloud-env-setup.sh \| bash` oder Inhalt von `deploy/cloud-env-setup.sh` (läuft als root vor Claude Code; endet immer mit Exit 0; idempotenter Clone/Fetch nach `~/.claude-plugins/claude-voice`; Environment-Cache ~7 Tage, Updates kommen beim Cache-Rebuild) |
 | Aktivierung | Env `CLAUDE_CODE_PLUGIN_DIRS=~/.claude-plugins/claude-voice` (Env-Pendant zu `--plugin-dir`, Claude Code ≥ 2.1.280, Plugin lädt als `claude-voice@inline`); `extraKnownMarketplaces` aus `.claude/settings.json` funktioniert in Cloud-Sessions **nicht** |
-| Env | `CLAUDE_VOICE_URL=https://vox.goetzken.dev/speak`, `CLAUDE_VOICE_REF=v0.1.0` (Tag pinnen, empfohlen); optional `CLAUDE_VOICE_REPO`, `CLAUDE_VOICE_PLUGIN_DIR` |
+| Env | `CLAUDE_VOICE_URL=https://relay.example.com/speak`, `CLAUDE_VOICE_TOKEN` (oder Network Secret, s. u.), `CLAUDE_VOICE_REF=<Release-Tag>` (Tag pinnen, empfohlen); optional `CLAUDE_VOICE_REPO`, `CLAUDE_VOICE_PLUGIN_DIR` |
 | Privates Repo | `CLAUDE_VOICE_GH_TOKEN` = Fine-grained PAT, nur dieses Repo, Contents read-only (läuft per `GIT_CONFIG_*`-Header, nie in URL/argv/Disk). Alternative: Repo öffentlich machen (enthält keine Secrets), PAT entfällt |
-| Netzwerk | Level „Trusted" erreicht `vox.goetzken.dev` nicht. Entweder Custom-Allowlist mit `vox.goetzken.dev` oder (bevorzugt) **Network Secret**: Host `vox.goetzken.dev`, Header `Authorization`, Prefix `Bearer`, Wert = Relay-Token. Der Agent-Proxy hängt ihn an, der Host ist bei jedem Level erreichbar, der Token gelangt nie in die VM. Dann `CLAUDE_VOICE_TOKEN` **nicht** setzen (Hook sendet keinen Header, Proxy ergänzt ihn) |
+| Netzwerk | Level „Trusted" erreicht eigene Domains nicht. Entweder Custom-Allowlist mit der Relay-Domain (Token dann als Env `CLAUDE_VOICE_TOKEN`) oder (sicherer) **Network Secret**: Host = Relay-Domain, Header `Authorization`, Prefix `Bearer`, Wert = Relay-Token. Der Agent-Proxy hängt ihn an, der Host ist bei jedem Level erreichbar, der Token gelangt nie in die VM. Dann `CLAUDE_VOICE_TOKEN` **nicht** setzen (Hook sendet keinen Header, Proxy ergänzt ihn) |
 | Hinweis | Network Secrets werden nicht an Requests des Setup-Scripts angehängt (hier irrelevant) |
 
 Hook in der Cloud: fork + `setsid`, das Kind leitet fd 0–2 auf `/dev/null` (sonst wartet Claude Code auf die Pipes: gemessen 5,26 s vorher, 0,05 s nachher); kein TTY nötig; `urllib` respektiert `HTTPS_PROXY`.

@@ -1,8 +1,8 @@
-# claude-voice relay config for PVE01 (v0.1: only the notebook sidecar is served).
+# claude-voice relay config for production (v0.1: only the notebook sidecar is served).
 # Secrets NEVER go in here: CLAUDE_VOICE_TOKEN comes from .env.
 
 [server]
-host = "0.0.0.0"        # inside the container; published on 10.0.2.1:8787 (RELAY_BIND)
+host = "0.0.0.0"        # inside the container; published on RELAY_BIND:8787
 port = 8787
 
 [defaults]

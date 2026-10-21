@@ -63,7 +63,6 @@ Alle Pfade zusätzlich unter `CLAUDE_VOICE_BASE_PATH` (Produktion `/speak`, z. B
 - `delivered` gilt beim Schreiben in den Socket; bei halb offener Verbindung (Laptop-Standby) kann ein Event bis zum 30-s-Write-Timeout verloren gehen (begrenzt durch TTL; Ack-basierte Redelivery: Roadmap).
 - Kein Rate-Limit auf 401 (Token 64 Hex-Zeichen).
 - `play_at` wartet max. 5 s; echte Synchronität erst v0.3.
-- Betrieb: Platte auf PVE01 zu 93 % voll (Ops-Risiko, kein Code-Thema).
 
 ## Entscheidungen
 | Thema | Entscheidung | Grund |
@@ -73,12 +72,12 @@ Alle Pfade zusätzlich unter `CLAUDE_VOICE_BASE_PATH` (Produktion `/speak`, z. B
 | Veraltete Events | TTL, danach verworfen | Nichts 10 Minuten später vorlesen |
 | Routing-Default | `active` | Kein Echo auf allen Geräten |
 | Stack | Python stdlib | Null Abhängigkeiten, läuft überall |
-| TTS | vox.goetzken.dev (nicht LiteLLM) | vox streamt echt (0,25–0,9 s bis zum ersten Byte); LiteLLM fake-streamt (~3,6 s) und liefert ~50 % 502 |
+| TTS | Server mit echtem Streaming (nicht über ein rendernd puffernes Gateway) | erstes Byte 0,25–0,9 s statt ~3,6 s bei Fake-Streaming |
 | Audioformat | PCM, Player nach `Content-Type` | `stream=true` liefert immer `audio/pcm` 24 kHz s16le mono, egal welches `response_format`; Raw-PCM-Flags für mpv/ffplay |
-| Öffentlicher Pfad | Präfix `/speak` auf der geteilten vox-Resource mit Bypass `ACCEPT PATH /speak/*` | keine neue Domain/Resource; Bypass so eng wie möglich |
+| Öffentlicher Pfad | Präfix (z. B. `/speak`) auf einer bestehenden, geschützten Proxy-Resource mit Bypass nur für `<präfix>/*` | keine neue Domain/Resource; Bypass so eng wie möglich |
 | Base-Path | im Relay (`CLAUDE_VOICE_BASE_PATH`) statt Proxy-Rewrite | kein Rewrite-Setup in Pangolin, Pfad-Traversal wird im Relay strikt behandelt |
 | Cloud-Aktivierung | `CLAUDE_CODE_PLUGIN_DIRS` | Marketplace-Einträge aus `.claude/settings.json` greifen in Cloud-Sessions nicht |
-| Cloud-Token | Network Secret für `vox.goetzken.dev` (`Authorization: Bearer`) | Token gelangt nie in die VM; `CLAUDE_VOICE_TOKEN` bleibt dort ungesetzt |
+| Cloud-Token | bevorzugt Network Secret für die Relay-Domain (`Authorization: Bearer`), alternativ Env `CLAUDE_VOICE_TOKEN` | Network Secret: Token gelangt nie in die VM |
 | Cloud-Hook | fork + `setsid`, fd 0–2 auf `/dev/null`, `async: true` | sonst wartet Claude Code auf Pipes (5,26 s statt 0,05 s) |
 
 ## Roadmap
