@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code hook -> claude-voice relay. Never blocks the session, never fails loudly.
 
-Events: Stop (speaks last assistant message), Notification (speaks the notification).
+Events: Stop (speaks `last_assistant_message`, falls back to parsing the transcript), Notification (speaks `message`).
 Env: CLAUDE_VOICE_URL, CLAUDE_VOICE_TOKEN, CLAUDE_VOICE_TARGET (default: relay route),
      CLAUDE_VOICE_MAX_CHARS (default 500), CLAUDE_VOICE_TIMEOUT (default 2), CLAUDE_VOICE_RETRIES (default 1)
 """
@@ -14,6 +14,13 @@ import urllib.error
 import urllib.request
 
 STATE_DIR = os.path.expanduser(os.environ.get("CLAUDE_VOICE_STATE_DIR", "~/.claude-voice"))
+
+
+def env_num(name: str, default, cast):
+    try:
+        return cast(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return cast(default)
 
 
 def locally_muted(session_id: str) -> bool:
@@ -91,11 +98,14 @@ def main() -> int:
     if locally_muted(sid):
         return 0
     event = data.get("hook_event_name", "")
-    max_chars = int(os.environ.get("CLAUDE_VOICE_MAX_CHARS", "500"))
+    max_chars = env_num("CLAUDE_VOICE_MAX_CHARS", "500", int)
     if event == "Stop":
         if data.get("stop_hook_active"):
             return 0
-        text = clean(last_assistant_text(data.get("transcript_path", "")), max_chars)
+        raw = data.get("last_assistant_message")
+        if not isinstance(raw, str) or not raw.strip():
+            raw = last_assistant_text(str(data.get("transcript_path") or ""))
+        text = clean(raw, max_chars)
     elif event == "Notification":
         text = clean(str(data.get("message", "")), max_chars)
     else:
@@ -106,15 +116,21 @@ def main() -> int:
                "priority": "high" if event == "Notification" else "normal"}
     if os.environ.get("CLAUDE_VOICE_TARGET"):
         payload["target"] = os.environ["CLAUDE_VOICE_TARGET"]
-    timeout = float(os.environ.get("CLAUDE_VOICE_TIMEOUT", "2"))
-    retries = int(os.environ.get("CLAUDE_VOICE_RETRIES", "1"))
+    timeout = env_num("CLAUDE_VOICE_TIMEOUT", "2", float)
+    retries = max(0, env_num("CLAUDE_VOICE_RETRIES", "1", int))
     token = os.environ.get("CLAUDE_VOICE_TOKEN", "")
 
     if hasattr(os, "fork") and not os.environ.get("CLAUDE_VOICE_SYNC"):
         if os.fork() != 0:       # parent returns immediately; session is never held up
             return 0
-        os.setsid()
-        sys.stdout = sys.stderr = open(os.devnull, "w")
+        try:
+            null = os.open(os.devnull, os.O_RDWR)
+            for fd in (0, 1, 2):     # drop the pipes to Claude Code, or it waits for them to close
+                os.dup2(null, fd)
+            os.setsid()
+            post(url, token, payload, timeout, retries)
+        finally:
+            os._exit(0)
     post(url, token, payload, timeout, retries)
     return 0
 

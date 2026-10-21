@@ -228,6 +228,8 @@ home = ["a", "b"]
     test_relay.run_base_path()
     import test_sidecar
     test_sidecar.run()
+    import test_hook
+    test_hook.run()
     print(f"\n{len(PASSED)} checks passed")
 
 
