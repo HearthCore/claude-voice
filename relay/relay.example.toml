@@ -1,0 +1,33 @@
+# claude-voice relay config. Secrets NEVER go in here: CLAUDE_VOICE_TOKEN comes from env.
+
+[server]
+host = "127.0.0.1"      # in Docker/remote: "0.0.0.0" behind Pangolin/TLS, token required
+port = 8787
+
+[defaults]
+route = "active"        # device with the freshest connection speaks
+ttl_s = 45              # events older than this are dropped, never read out late
+
+# source -> target (hook sends source="claude-code" unless overridden)
+[routes]
+claude-code = "home"
+
+[devices.omarchy-notebook]
+caps = ["stream", "local-tts"]
+volume = 1.0
+latency_offset_ms = 0
+
+# Planned subscribers (v0.2, see docs/SPECS.md): HA / TV need audio-URL fan-out.
+[devices.homeassistant]
+caps = ["file-url"]
+volume = 0.6
+latency_offset_ms = 0
+
+[devices.smarttv]
+caps = ["file-url"]
+volume = 0.5
+latency_offset_ms = 800
+
+[groups]
+home   = ["homeassistant", "smarttv", "omarchy-notebook"]
+mobile = ["omarchy-notebook"]

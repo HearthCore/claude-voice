@@ -1,0 +1,7 @@
+{
+  "name": "claude-voice",
+  "version": "0.1.0",
+  "description": "Speak Claude Code replies on your devices via a relay + local sidecar (OpenAI-compatible TTS, streaming, device groups).",
+  "author": { "name": "Timo" },
+  "license": "MIT"
+}

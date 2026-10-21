@@ -1,0 +1,6 @@
+.env
+*.env
+relay/relay.toml
+__pycache__/
+*.pyc
+.claude-voice/
