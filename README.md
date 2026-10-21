@@ -112,6 +112,7 @@ Stop: spricht bevorzugt `last_assistant_message` (Transcript nur Fallback); Noti
 | `CLAUDE_VOICE_SYNC` | – | Debug: ohne fork/setsid, synchron |
 | `CLAUDE_VOICE_NESTED` | `skip` | `skip`: Hooks verschachtelter Hilfs-Sessions (ein `claude` unterhalb eines anderen `claude`, z. B. `claude -p` aus dem Hook eines anderen Plugins; Erkennung über /proc-Abstammung, nur Linux) sprechen nie; `speak`: immer |
 | `CLAUDE_VOICE_NOTIFY_TYPES` | `permission_prompt,elicitation_dialog,agent_needs_input` | Notification-Typen, die gesprochen werden; `all` = alle (auch ohne Typ), `none` = keine |
+| `CLAUDE_VOICE_AUTO_UPDATE` | an | `0` schaltet das automatische Update beim Session-Start ab (das explizite `voice update` bleibt möglich) |
 | `CLAUDE_VOICE_STOP_MODE` | `final` | `final`: Stop-Zwischenmeldungen bei laufenden Hintergrund-Subagents (`background_tasks`) nicht sprechen; `all`: jedes Stop sprechen |
 | `CLAUDE_VOICE_LOG_LEVEL` | `off` | `off\|error\|warn\|info\|debug`; JSON-Zeilen in `$CLAUDE_VOICE_STATE_DIR/hook.log` (0600, Rotation bei 256 KiB → `hook.log.1`) |
 
@@ -123,7 +124,8 @@ Slash-Command: `/voice status | mute | unmute | speak <text>`.
 
 | Schritt | Wert |
 |---|---|
-| Setup-Script | `curl -fsSL https://raw.githubusercontent.com/HearthCore/claude-voice/<Tag>/deploy/cloud-env-setup.sh \| bash` oder Inhalt von `deploy/cloud-env-setup.sh` (läuft als root vor Claude Code; endet immer mit Exit 0; idempotenter Clone/Fetch nach `~/.claude-plugins/claude-voice`; Environment-Cache ~7 Tage, Updates kommen beim Cache-Rebuild) |
+| Setup-Script | `curl -fsSL https://raw.githubusercontent.com/HearthCore/claude-voice/<Tag>/deploy/cloud-env-setup.sh \| bash` oder Inhalt von `deploy/cloud-env-setup.sh` (läuft als root vor Claude Code; endet immer mit Exit 0; idempotenter Clone/Fetch nach `~/.claude-plugins/claude-voice`; Environment-Cache ~7 Tage) |
+| Updates | `CLAUDE_VOICE_REF` ändern → greift beim nächsten Session-Start automatisch (`hooks/self_update.py`, nur bei detached Checkout ohne lokale Änderungen); sofort: `/claude-voice:voice update <tag>`; `/claude-voice:voice version` zeigt den Stand. Hook-Skripte werden bei jedem Aufruf frisch von der Platte geladen, nur Änderungen an `hooks.json` brauchen eine neue Session. Abschalten: `CLAUDE_VOICE_AUTO_UPDATE=0`. Immer einen **Tag** als Ref verwenden: ein bereits lokal bekannter Branch (z. B. `main`) wird nicht erneut geholt |
 | Aktivierung | Env `CLAUDE_CODE_PLUGIN_DIRS=~/.claude-plugins/claude-voice` (Env-Pendant zu `--plugin-dir`, Claude Code ≥ 2.1.280, Plugin lädt als `claude-voice@inline`); `extraKnownMarketplaces` aus `.claude/settings.json` funktioniert in Cloud-Sessions **nicht** |
 | Env | `CLAUDE_VOICE_URL=https://relay.example.com/speak`, `CLAUDE_VOICE_TOKEN` (oder Network Secret, s. u.), `CLAUDE_VOICE_REF=<Release-Tag>` (Tag pinnen, empfohlen); optional `CLAUDE_VOICE_REPO`, `CLAUDE_VOICE_PLUGIN_DIR` |
 | Privates Repo | `CLAUDE_VOICE_GH_TOKEN` = Fine-grained PAT, nur dieses Repo, Contents read-only (läuft per `GIT_CONFIG_*`-Header, nie in URL/argv/Disk). Alternative: Repo öffentlich machen (enthält keine Secrets), PAT entfällt |
@@ -153,7 +155,7 @@ Tokens, Keys und Extra-Header gehen nie über Klartext-http an Nicht-Loopback-Ho
 ## Tests
 
 ```bash
-python3 tests/smoke.py      # 179 Checks: tests/test_relay.py, test_sidecar.py, test_hook.py, test_logging.py
+python3 tests/smoke.py      # 196 Checks: tests/test_relay.py, test_sidecar.py, test_hook.py, test_logging.py
 ```
 
 Fake-TTS, tee-/Stub-Player, freie Ports; kein Netzwerk nötig. Repo-Agents: `.claude/agents/reviewer.md` (read-only), `scout.md` (haiku, read-only).
