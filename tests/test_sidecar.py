@@ -92,8 +92,85 @@ def unit():
     check("main loop survives UnicodeDecodeError, doubling backoff", len(calls) == 4 and sleeps == [1.0, 2.0, 4.0, 8.0])
 
 
+def unit2():
+    from datetime import datetime, timedelta, timezone
+    acks, spoken = [], []
+    old = (sidecar.ack, sidecar.speak)
+    sidecar.ack = lambda i, s: acks.append((i, s))
+    sidecar.speak = lambda ev: spoken.append(ev) or "played"
+    try:
+        far = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+        past = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        now = time.monotonic()
+        sidecar.handle({"id": "f1", "text": "x", "created": far, "ttl_s": 1, "expires_in_s": 30, "_recv": now})
+        sidecar.handle({"id": "f2", "text": "x", "created": past, "ttl_s": 1, "expires_in_s": 30, "_recv": now})
+        sidecar.handle({"id": "f3", "text": "x", "expires_in_s": 1.0, "_recv": now - 5})
+    finally:
+        sidecar.ack, sidecar.speak = old
+    check("expires_in_s beats wall-clock created/ttl", acks == [("f1", "played"), ("f2", "played"), ("f3", "expired")])
+
+    h = sidecar.parse_extra_headers("Authorization: x; host: y; Content-Type: z; Connection: c; Content-Length: 1; "
+                                    "Transfer-Encoding: chunked; X-Ok: fine; X-Uni: gr\u00fc\u00df")
+    check("extra header denylist + printable ASCII only", h == {"X-Ok": "fine"})
+    p = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, %r); import sidecar" % os.path.join(ROOT, "sidecar")],
+                       env={**os.environ, "TTS_PCM_RATE": "abc", "TTS_PCM_CHANNELS": "", "TTS_RETRIES": "x"}, capture_output=True, timeout=10)
+    check("invalid numeric env -> defaults, no crash at import", p.returncode == 0)
+    p = subprocess.run([sys.executable, f"{ROOT}/sidecar/sidecar.py"], capture_output=True, timeout=10,
+                       env={**os.environ, "CLAUDE_VOICE_DEVICE": "d", "CLAUDE_VOICE_TOKEN": "t" * 32, "CLAUDE_VOICE_URL": "http://10.255.255.1:9"})
+    check("sidecar refuses token over plain http to remote relay (exit 2)", p.returncode == 2 and b"FATAL" in p.stdout)
+
+    # TTS credentials: remote plain http refused; redirects never followed
+    got = []
+
+    class Tgt(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            got.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    tgt = http.server.ThreadingHTTPServer(("127.0.0.1", free_port()), Tgt)
+    threading.Thread(target=tgt.serve_forever, daemon=True).start()
+
+    class Red(Tgt):
+        def do_POST(self):
+            self.send_response(307)
+            self.send_header("Location", f"http://127.0.0.1:{tgt.server_address[1]}/v1/audio/speech")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    red = http.server.ThreadingHTTPServer(("127.0.0.1", free_port()), Red)
+    threading.Thread(target=red.serve_forever, daemon=True).start()
+    saved = (sidecar.TTS_URL, sidecar.TTS_KEY)
+    try:
+        sidecar.TTS_KEY = "secret"
+        sidecar.TTS_URL = "http://10.255.255.1:9/v1"
+        t0 = time.time()
+        try:
+            sidecar.tts_open("x")
+            ok = False
+        except sidecar.TTSError:
+            ok = time.time() - t0 < 1
+        check("TTS key not sent over plain http to remote host", ok)
+        sidecar.TTS_URL = f"http://127.0.0.1:{red.server_address[1]}/v1"
+        try:
+            sidecar.tts_open("x")
+            ok = False
+        except sidecar.TTSError:
+            ok = True
+        check("TTS redirect not followed (no Authorization at target)", ok and got == [])
+    finally:
+        sidecar.TTS_URL, sidecar.TTS_KEY = saved
+        red.shutdown()
+        tgt.shutdown()
+
+
 def run():
     unit()
+    unit2()
     tmp = tempfile.mkdtemp()
     cfg = os.path.join(tmp, "relay.toml")
     open(cfg, "w").write("[defaults]\nroute = \"d\"\n[devices.d]\n")
@@ -104,6 +181,14 @@ def run():
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             fake["n"] += 1
             seen.append((body, dict(self.headers)))
+            if fake["mode"] == "trunc":
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/pcm")
+                self.send_header("Content-Length", "1000")
+                self.end_headers()
+                self.wfile.write(b"\x00" * 100)
+                self.close_connection = True
+                return
             if fake["mode"] == "500" or (fake["mode"] == "502once" and fake["n"] == 1):
                 self.send_response(500 if fake["mode"] == "500" else 502)
                 self.send_header("Content-Length", "0")
@@ -160,6 +245,11 @@ def run():
         e = say("Ein Satz.")
         check("always 500 -> tts_error after retries", wait_for(lambda: status_of(base, e) == "tts_error", 8) and fake["n"] == 3)
 
+        fake.update(mode="trunc", n=0)
+        e = say("Abgeschnitten.")
+        ok = wait_for(lambda: status_of(base, e) == "tts_error")
+        check("truncated audio -> tts_error, never played", ok)
+
         fake.update(mode="ok", n=0, cts=["audio/pcm", "audio/mpeg"])
         e = say("Erster Satz. Zweiter Satz.")
         check("sentence with different content-type is skipped", wait_for(lambda: status_of(base, e) == "played")
@@ -177,6 +267,19 @@ def run():
         check("dead player -> player_error, fetch thread released", st == "player_error" and time.time() - t0 < 10
               and wait_for(lambda: threading.active_count() <= before, 5))
         fake["chunks"] = 3
+
+        # stalled player (never reads stdin): watchdog kills it, next event still works
+        fake.update(mode="ok", n=0, chunks=3000)
+        sidecar.PLAYER_DEADLINE_S = 2
+        os.environ["CLAUDE_VOICE_PLAYER_CMD"] = "sleep 600"
+        t0 = time.time()
+        st = sidecar.speak({"text": "Haengt."})
+        check("stalled player killed by deadline -> player_error", st == "player_error" and time.time() - t0 < 8)
+        fake["chunks"] = 3
+        os.environ["CLAUDE_VOICE_PLAYER_CMD"] = "tee /dev/null"
+        check("sidecar works after a stalled player", sidecar.speak({"text": "Wieder."}) == "played")
+        os.environ.pop("CLAUDE_VOICE_PLAYER_CMD")
+        sidecar.PLAYER_DEADLINE_S = 180
 
         # relay restart: sidecar must reconnect on its own
         relay.send_signal(signal.SIGKILL)
