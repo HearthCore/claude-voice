@@ -221,7 +221,12 @@ class State:
         }
 
 
-def make_handler(state: State, tokens: list[str], no_auth: bool):
+def norm_base_path(v) -> str:
+    v = str(v or "").strip().strip("/")
+    return "/" + v if v else ""
+
+
+def make_handler(state: State, tokens: list[str], no_auth: bool, base_path: str = ""):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = f"claude-voice-relay/{VERSION}"
@@ -303,8 +308,15 @@ def make_handler(state: State, tokens: list[str], no_auth: bool):
         def do_POST(self):
             self._safe(self._post)
 
-        def _get(self):
+        def _url(self):
             u = urlparse(self.path)
+            p = u.path
+            if base_path and (p == base_path or p.startswith(base_path + "/")):
+                p = p[len(base_path):] or "/"
+            return u._replace(path=p)
+
+        def _get(self):
+            u = self._url()
             if u.path == "/healthz":
                 return self._json(200, {"ok": True, "version": VERSION})
             if not self._guard():
@@ -321,7 +333,7 @@ def make_handler(state: State, tokens: list[str], no_auth: bool):
         def _post(self):
             if not self._guard():
                 return
-            u = urlparse(self.path)
+            u = self._url()
             try:
                 body = self._body()
                 if u.path == "/v1/speak":
@@ -409,6 +421,7 @@ def main(argv: list[str] | None = None) -> int:
     port = a.port or int(os.environ.get("CLAUDE_VOICE_PORT") or cfg.get("server", {}).get("port", 8787))
 
     tokens = [t.strip() for t in (os.environ.get("CLAUDE_VOICE_TOKENS") or os.environ.get("CLAUDE_VOICE_TOKEN") or "").split(",") if t.strip()]
+    base_path = norm_base_path(os.environ.get("CLAUDE_VOICE_BASE_PATH") or cfg.get("server", {}).get("base_path"))
     no_auth = os.environ.get("LOCAL_UNSAFE_NO_AUTH", "").lower() in ("1", "true", "yes")
 
     if no_auth:
@@ -424,10 +437,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     state = State(cfg)
-    srv = ThreadingHTTPServer((host, port), make_handler(state, tokens, no_auth))
+    srv = ThreadingHTTPServer((host, port), make_handler(state, tokens, no_auth, base_path))
     srv.daemon_threads = True
     log(f"claude-voice relay {VERSION} on {host}:{srv.server_address[1]} "
-        f"devices={list(state.devices)} groups={list(state.groups)}")
+        f"devices={list(state.devices)} groups={list(state.groups)} base_path={base_path or '-'}")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

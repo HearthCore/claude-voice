@@ -1,6 +1,8 @@
 """Relay hardening tests (in-process server, white-box where useful)."""
 import json
 import os
+import subprocess
+import tempfile
 import socket
 import sys
 import threading
@@ -121,3 +123,32 @@ def run():
     finally:
         srv.shutdown()
         relay.KEEPALIVE_S = 15
+
+
+def run_base_path():
+    check("base_path normalized", [relay.norm_base_path(x) for x in ("claude-voice/", "/a/b", "", None, "/")] == ["/claude-voice", "/a/b", "", "", ""])
+    st = relay.State({"devices": {"a": {}, "b": {}}, "groups": {}, "defaults": {"route": "all"}})
+    srv = relay.ThreadingHTTPServer(("127.0.0.1", 0), relay.make_handler(st, [TOKEN], False, "/claude-voice"))
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    pre = base + "/claude-voice"
+    try:
+        check("prefixed /healthz 200", req(pre, "GET", "/healthz", token=None)[0] == 200)
+        check("prefixed /v1/state 401 without token", req(pre, "GET", "/v1/state", token=None)[0] == 401)
+        check("prefixed /v1/state 200 with token", req(pre, "GET", "/v1/state")[0] == 200)
+        check("un-prefixed /v1/state still 200", req(base, "GET", "/v1/state")[0] == 200)
+        check("un-prefixed /healthz still 200", req(base, "GET", "/healthz", token=None)[0] == 200)
+        check("/claude-voicex/ does not match", req(base + "/claude-voicex", "GET", "/v1/state")[0] == 404
+              and req(base + "/claude-voicex", "GET", "/v1/state", token=None)[0] in (401, 404))
+        got = []
+        open_stream(pre, "a", got)
+        check("SSE via prefix keeps query string", wait_for(lambda: st.connections["a"] == 1))
+        tmp = tempfile.mkdtemp()
+        env = {**os.environ, "CLAUDE_VOICE_URL": pre, "CLAUDE_VOICE_TOKEN": TOKEN, "CLAUDE_VOICE_TARGET": "a",
+               "CLAUDE_VOICE_SYNC": "1", "CLAUDE_VOICE_STATE_DIR": tmp}
+        subprocess.run([sys.executable, f"{ROOT}/hooks/speak.py"], env=env, timeout=10,
+                       input=json.dumps({"hook_event_name": "Notification", "session_id": "bp", "message": "Hallo Prefix."}).encode())
+        check("hook posting to base+prefix delivers event", wait_for(lambda: len(got) == 1 and got[0]["text"] == "Hallo Prefix."))
+    finally:
+        srv.shutdown()
