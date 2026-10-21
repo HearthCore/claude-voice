@@ -4,6 +4,8 @@
 Events: Stop (speaks `last_assistant_message`, falls back to parsing the transcript), Notification (speaks `message`).
 Env: CLAUDE_VOICE_URL, CLAUDE_VOICE_TOKEN, CLAUDE_VOICE_TARGET (default: relay route),
      CLAUDE_VOICE_MAX_CHARS (default 500), CLAUDE_VOICE_TIMEOUT (default 2), CLAUDE_VOICE_RETRIES (default 1)
+     CLAUDE_VOICE_STOP_MODE=final|all (default final): "final" skips a Stop while a background subagent is still
+     running (interim message; the real final Stop follows). Running background shells do not suppress.
      CLAUDE_VOICE_LOG_LEVEL=off|error|warn|info|debug (default off): JSON lines appended to
      $CLAUDE_VOICE_STATE_DIR/hook.log (0600, rotated at 256 KiB to hook.log.1). info = decision + metadata + char
      count; debug adds raw/cleaned text and the posted payload. Local file only; token is never logged.
@@ -51,9 +53,20 @@ def _write(level: str, event: str, **fields) -> None:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
+def running_subagents(data: dict) -> list:
+    bt = data.get("background_tasks")
+    if not isinstance(bt, list):
+        return []
+    return [t for t in bt if isinstance(t, dict) and t.get("type") == "subagent" and t.get("status") == "running"]
+
+
 def decide(data: dict, decision: str, source: str = "", raw: str = "", text: str = "", payload: dict | None = None) -> None:
+    subs = running_subagents(data)
     log("info", "decision", decision=decision, chars=len(text), source=source, keys=sorted(data),
-        input={k: data.get(k) for k in META_KEYS if k in data})
+        input={k: data.get(k) for k in META_KEYS if k in data}, running_subagents=len(subs))
+    if subs:
+        log("debug", "background_tasks", tasks=[{k: t.get(k) for k in ("id", "type", "status", "agent_type", "description")}
+                                                for t in data["background_tasks"] if isinstance(t, dict)])
     log("debug", "content", decision=decision, source=source, raw=raw[:2000], text=text, payload=payload)
 
 
@@ -179,6 +192,9 @@ def main() -> int:
     if event == "Stop":
         if data.get("stop_hook_active"):
             decide(data, "skip:stop_hook_active")
+            return 0
+        if os.environ.get("CLAUDE_VOICE_STOP_MODE", "final").strip().lower() != "all" and running_subagents(data):
+            decide(data, "skip:background_subagent")
             return 0
         raw, source = data.get("last_assistant_message"), "last_assistant_message"
         if not isinstance(raw, str) or not raw.strip():

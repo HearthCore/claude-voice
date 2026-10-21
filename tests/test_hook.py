@@ -138,6 +138,32 @@ def run():
         os.environ.pop("CLAUDE_VOICE_LOG_LEVEL")
     check("hook.log rotates to hook.log.1 (one generation)", sorted(os.listdir(rt)) == ["hook.log", "hook.log.1"]
           and os.path.getsize(os.path.join(rt, "hook.log")) <= 700)
+    # interim Stop while a background subagent runs
+    sub = [{"id": "af73", "type": "subagent", "status": "running", "description": "recherche", "agent_type": "general-purpose"}]
+    base_in = {"hook_event_name": "Stop", "session_id": "bg", "last_assistant_message": "Zwischenstand."}
+
+    def delivered(extra, e=env):
+        n0 = len(posts)
+        p, _ = run_hook({**base_in, **extra}, e)
+        time.sleep(0.8)
+        return p.returncode == 0 and len(posts) > n0
+
+    check("interim Stop with running subagent -> nothing sent", not delivered({"background_tasks": sub}))
+    d, recs = hook_log("info", {**base_in, "background_tasks": sub})
+    dec = [r for r in recs if r["event"] == "decision"]
+    check("skip decision logged with subagent count", dec[0]["decision"] == "skip:background_subagent" and dec[0]["running_subagents"] == 1)
+    _, recs = hook_log("debug", {**base_in, "background_tasks": sub})
+    check("debug logs background_tasks list", any(r["event"] == "background_tasks" and r["tasks"][0]["id"] == "af73" for r in recs))
+    check("STOP_MODE=all speaks anyway", delivered({"background_tasks": sub}, {**env, "CLAUDE_VOICE_STOP_MODE": "all"}))
+    check("running shell task does not suppress", delivered({"background_tasks": [{"type": "shell", "status": "running"}]}))
+    check("finished subagent does not suppress", delivered({"background_tasks": [{**sub[0], "status": "completed"}]}))
+    check("empty background_tasks -> sent", delivered({"background_tasks": []}))
+    check("missing background_tasks -> sent", delivered({}))
+    check("garbage background_tasks (string/dict/mixed) -> sent, exit 0",
+          all(delivered({"background_tasks": g}) for g in ("running", {"type": "subagent", "status": "running"}, [None, 3, "x"])))
+    n0 = len(posts)
+    run_hook({"hook_event_name": "Notification", "message": "Frage.", "background_tasks": sub}, env)
+    check("Notification unaffected by running subagent", sent(n0 + 1))
     cap.shutdown()
 
 
