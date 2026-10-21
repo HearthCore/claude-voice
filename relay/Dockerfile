@@ -1,4 +1,5 @@
 FROM python:3.13-slim
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 RUN useradd -r -u 10001 voice
 WORKDIR /app
 COPY relay.py /app/relay.py

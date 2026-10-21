@@ -10,10 +10,12 @@
 #
 # Env (all optional, no secrets in this file):
 #   CLAUDE_VOICE_REPO        default https://github.com/HearthCore/claude-voice.git
-#   CLAUDE_VOICE_REF         branch or tag, default main
+#   CLAUDE_VOICE_REF         branch or tag, default main. Recommended: a release tag (e.g. v0.1.0),
+#                            so a moving branch never runs unreviewed code in every session.
 #   CLAUDE_VOICE_PLUGIN_DIR  default $HOME/.claude-plugins/claude-voice
 #   CLAUDE_VOICE_GH_TOKEN    fine-grained PAT, read-only "Contents" on this one repo
 #                            (only needed while the repo is private; never written to disk)
+[ -n "${BASH_VERSION:-}" ] || { echo "[claude-voice-setup] needs bash, skipping"; exit 0; }
 # No `set -e/-u`: an unbound variable would abort the shell and with it the session start.
 
 REPO="${CLAUDE_VOICE_REPO:-https://github.com/HearthCore/claude-voice.git}"
@@ -21,6 +23,8 @@ REF="${CLAUDE_VOICE_REF:-main}"
 DIR="${CLAUDE_VOICE_PLUGIN_DIR:-$HOME/.claude-plugins/claude-voice}"
 
 log() { echo "[claude-voice-setup] $*"; }
+# `timeout` is coreutils; never let its absence silently skip the clone.
+to() { if command -v timeout >/dev/null; then timeout "$@"; else shift; "$@"; fi; }
 
 git_auth() {
   # Token goes in via an ephemeral http header, never into the URL, .git/config or the process list.
@@ -41,7 +45,7 @@ main() {
 
   if [ -d "$DIR/.git" ]; then
     log "updating $DIR ($REF)"
-    timeout 60 bash -c "$(declare -f git_auth); $(declare -p REF DIR); \
+    to 60 bash -c "$(declare -f git_auth); $(declare -p REF DIR); \
       git_auth -C \"\$DIR\" fetch --depth 1 origin \"\$REF\" && git -C \"\$DIR\" checkout -q --detach FETCH_HEAD" \
       || log "update failed, keeping the existing checkout"
   elif [ -e "$DIR" ]; then
@@ -50,8 +54,8 @@ main() {
     log "cloning $REPO ($REF) -> $DIR"
     local tmp
     tmp=$(mktemp -d "$(dirname "$DIR")/.claude-voice.XXXXXX") || return 0
-    if timeout 90 bash -c "$(declare -f git_auth); $(declare -p REF REPO); \
-         git_auth clone -q --depth 1 --branch \"\$REF\" \"\$REPO\" \"$tmp/repo\""; then
+    if to 90 bash -c "$(declare -f git_auth); $(declare -p REF REPO tmp); \
+         git_auth clone -q --depth 1 --branch \"\$REF\" \"\$REPO\" \"\$tmp/repo\""; then
       mv "$tmp/repo" "$DIR"
     else
       log "clone failed (private repo without CLAUDE_VOICE_GH_TOKEN? network?)"
