@@ -54,7 +54,7 @@ Alle Pfade zusätzlich unter `CLAUDE_VOICE_BASE_PATH` (Produktion `/speak`, z. B
 | Limits | Body 64 KiB, Text 4000, Felder ≤ 128, Ack-Status per Whitelist, `by_id` (1000) / History / Mutes begrenzt, max. 64 Streams, Socket-Timeout 30 s |
 | Fehler/Logs | generischer 500 ohne Interna; Steuerzeichen in Logs escaped; keine Tokens in Logs oder URLs |
 | Clients (Hook, voicectl, Sidecar) | Token/Keys/Extra-Header nie über Klartext-http an Nicht-Loopback-Hosts; Redirects nie verfolgt |
-| Logs | Nachrichtentext nur bei `CLAUDE_VOICE_LOG_LEVEL=debug`; Tokens, Keys und Extra-Header-Werte nie (Test); Hook-Log 0600, Rotation 256 KiB |
+| Logs | Nachrichtentext nur bei `CLAUDE_VOICE_LOG_LEVEL=debug`; Tokens, Keys, Extra-Header- und Extra-Body-Werte nie (Test); Hook-Log 0600, Rotation 256 KiB |
 | Hook | bereinigt Code, URLs, Tabellen; nur Assistant-Text, keine Dateiinhalte oder Tool-Outputs; blockiert nie |
 | TLS | terminiert Pangolin/Traefik |
 | Pangolin-Bypass | nur `PATH /speak/*` (nicht `/speak*`); Relay-Token ist dort die einzige Auth |
@@ -75,6 +75,7 @@ Alle Pfade zusätzlich unter `CLAUDE_VOICE_BASE_PATH` (Produktion `/speak`, z. B
 | Stack | Python stdlib | Null Abhängigkeiten, läuft überall |
 | TTS | Server mit echtem Streaming (nicht über ein rendernd puffernes Gateway) | erstes Byte 0,25–0,9 s statt ~3,6 s bei Fake-Streaming |
 | Audioformat | PCM, Player nach `Content-Type` | `stream=true` liefert immer `audio/pcm` 24 kHz s16le mono, egal welches `response_format`; Raw-PCM-Flags für mpv/ffplay |
+| TTS-Parameter | `TTS_INSTRUCTIONS` → `instructions`, `TTS_EXTRA_BODY` (JSON) wird in den Request gemischt | providerunabhängig; Wirkung entscheidet der TTS-Server, `input`/`stream` geschützt, Werte nie geloggt |
 | Öffentlicher Pfad | Präfix (z. B. `/speak`) auf einer bestehenden, geschützten Proxy-Resource mit Bypass nur für `<präfix>/*` | keine neue Domain/Resource; Bypass so eng wie möglich |
 | Base-Path | im Relay (`CLAUDE_VOICE_BASE_PATH`) statt Proxy-Rewrite | kein Rewrite-Setup in Pangolin, Pfad-Traversal wird im Relay strikt behandelt |
 | Cloud-Aktivierung | `CLAUDE_CODE_PLUGIN_DIRS` | Marketplace-Einträge aus `.claude/settings.json` greifen in Cloud-Sessions nicht |

@@ -168,9 +168,51 @@ def unit2():
         tgt.shutdown()
 
 
+def unit3():
+    """TTS_INSTRUCTIONS / TTS_EXTRA_BODY: body merge, protected keys, invalid JSON, values never logged."""
+    probe = ("import json, sys; sys.path.insert(0, %r); import sidecar\n"
+             "print('BODY=' + json.dumps(sidecar.tts_body('Hallo.'), sort_keys=True))\n"
+             "sys.exit(sidecar.main() if len(sys.argv) > 1 else 0)") % os.path.join(ROOT, "sidecar")
+
+    def body_of(env):
+        p = subprocess.run([sys.executable, "-c", probe], env={**os.environ, **env}, capture_output=True, text=True, timeout=10)
+        line = [l for l in p.stdout.splitlines() if l.startswith("BODY=")]
+        return p, (json.loads(line[0][5:]) if line else None)
+
+    _, b = body_of({"TTS_INSTRUCTIONS": "", "TTS_EXTRA_BODY": ""})
+    check("no extras -> body unchanged", b is not None and "instructions" not in b and set(b) == {"model", "voice", "input", "response_format", "stream"})
+    _, b = body_of({"TTS_INSTRUCTIONS": "Sprich ruhig.", "TTS_EXTRA_BODY": '{"instruct": "warm", "seed": 42, "voice": "jarvis"}'})
+    check("instructions + extra body merged (voice override allowed)", b["instructions"] == "Sprich ruhig." and b["instruct"] == "warm"
+          and b["seed"] == 42 and b["voice"] == "jarvis" and b["stream"] is True and b["input"] == "Hallo.")
+    p, b = body_of({"TTS_EXTRA_BODY": '{"input": "evil", "stream": false, "speed": 1.2}'})
+    check("extra body cannot override input/stream", b["input"] == "Hallo." and b["stream"] is True and b["speed"] == 1.2
+          and "may not override" in p.stdout)
+    for bad, why in (("{not json", "not valid JSON"), ("[1, 2]", "must be a JSON object"), ('{"a": "' + "x" * 9000 + '"}', "larger than")):
+        p, b = body_of({"TTS_EXTRA_BODY": bad})
+        if why == "not valid JSON":
+            check("invalid TTS_EXTRA_BODY -> warning, normal body, no crash", p.returncode == 0 and why in p.stdout and "a" not in (b or {}))
+        else:
+            check(f"TTS_EXTRA_BODY rejected: {why}", p.returncode == 0 and why in p.stdout)
+
+    # debug log of a real request attempt: keys + instructions yes, extra-body values never
+    sentinel = "SENTINEL-VALUE-9f3c"
+    port = free_port()
+    p = subprocess.run([sys.executable, "-c",
+                        "import sys; sys.path.insert(0, %r); import sidecar\n"
+                        "sidecar.log('tts extras: keys=' + str(sorted(sidecar.EXTRA_BODY)))\n"
+                        "try:\n    sidecar.tts_open('Hallo.')\nexcept Exception as e:\n    print('ERR', type(e).__name__)" % os.path.join(ROOT, "sidecar")],
+                       env={**os.environ, "CLAUDE_VOICE_LOG_LEVEL": "debug", "TTS_URL": f"http://127.0.0.1:{port}/v1", "TTS_RETRIES": "0",
+                            "TTS_INSTRUCTIONS": "Sprich ruhig.", "TTS_EXTRA_BODY": '{"api_token": "%s", "seed": 7}' % sentinel},
+                       capture_output=True, text=True, timeout=15)
+    out = p.stdout + p.stderr
+    check("debug log shows extra-body keys + instructions", "extra_body_keys=['api_token', 'seed']" in out and "Sprich ruhig." in out)
+    check("extra-body values never logged (debug)", sentinel not in out)
+
+
 def run():
     unit()
     unit2()
+    unit3()
     tmp = tempfile.mkdtemp()
     cfg = os.path.join(tmp, "relay.toml")
     open(cfg, "w").write("[defaults]\nroute = \"d\"\n[devices.d]\n")

@@ -87,6 +87,8 @@ journalctl --user -u claude-voice-sidecar -f      # Logs
 | `TTS_RETRIES` | `2` | Retries bei 5xx/Verbindungsfehler vor dem ersten Byte |
 | `TTS_KEY` | – | API-Key des TTS (falls nötig) |
 | `TTS_EXTRA_HEADERS` | – | `Name: Wert; Name2: Wert2` (Pangolin `P-Access-Token-Id` / `P-Access-Token`) |
+| `TTS_INSTRUCTIONS` | – | Sprechanweisung, wird als `instructions` (OpenAI-Feld) mitgeschickt |
+| `TTS_EXTRA_BODY` | – | JSON-Objekt mit providerspezifischen Feldern, z. B. `{"instruct": "ruhig", "seed": 42}`; `input`/`stream` nicht überschreibbar, max. 8 KiB, Werte werden nie geloggt |
 | `CLAUDE_VOICE_PLAYER_CMD` | – | Player-Override, sonst `mpv` → `ffplay` |
 | `CLAUDE_VOICE_PLAYER_DEADLINE_S` | `180` | Watchdog: hängender Player wird beendet |
 | `CLAUDE_VOICE_LOG_LEVEL` | `info` | `off\|error\|warn\|info\|debug` (siehe „Logging & Datenschutz“) |
@@ -140,7 +142,7 @@ Eine Variable für alle Komponenten: `CLAUDE_VOICE_LOG_LEVEL` (Relay/Sidecar Def
 | `info` | + Betrieb: Verbindungen, Event-ID, Gerät, Status, Zeichen**anzahl**, Requests. **Kein Nachrichtentext** |
 | `debug` | + vollständiger Inhalt: Hook-Input/Rohtext/bereinigter Text/Payload/POST-Ergebnis, Relay-Body und Zustellung, Sidecar-Text je Satz, TTS-Request (ohne Key/Header-Werte), Content-Type, TTFB, Player-Argv |
 
-Bei `debug` loggen Relay und Sidecar eine Warnung beim Start. Tokens, `Authorization`, `TTS_KEY` und `TTS_EXTRA_HEADERS`-Werte werden auf keinem Level geloggt (durch Test abgesichert).
+Bei `debug` loggen Relay und Sidecar eine Warnung beim Start. Tokens, `Authorization`, `TTS_KEY`, `TTS_EXTRA_HEADERS`- und `TTS_EXTRA_BODY`-Werte werden auf keinem Level geloggt (durch Test abgesichert).
 
 ## Sicherheit (Kurzfassung)
 
@@ -149,7 +151,7 @@ Tokens, Keys und Extra-Header gehen nie über Klartext-http an Nicht-Loopback-Ho
 ## Tests
 
 ```bash
-python3 tests/smoke.py      # 150 Checks: tests/test_relay.py, test_sidecar.py, test_hook.py, test_logging.py
+python3 tests/smoke.py      # 159 Checks: tests/test_relay.py, test_sidecar.py, test_hook.py, test_logging.py
 ```
 
 Fake-TTS, tee-/Stub-Player, freie Ports; kein Netzwerk nötig. Repo-Agents: `.claude/agents/reviewer.md` (read-only), `scout.md` (haiku, read-only).

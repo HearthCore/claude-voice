@@ -15,6 +15,10 @@ Env:
   TTS_EXTRA_HEADERS          extra TTS request headers, "Name: value; Name2: value2" (e.g. Pangolin
                              P-Access-Token-Id / P-Access-Token). Invalid names or CR/LF values are
                              ignored (logged once, values never logged).
+  TTS_INSTRUCTIONS           speaking instructions, sent as "instructions" (OpenAI field); unset -> omitted
+  TTS_EXTRA_BODY             JSON object merged into the TTS request body for provider-specific
+                             parameters, e.g. '{"instruct": "calm", "seed": 42}'. "input"/"stream" cannot be
+                             overridden. Invalid JSON or > 8 KiB -> warning, ignored. Values are never logged.
   CLAUDE_VOICE_PLAYER_CMD    override player (bypasses selection), e.g. "mpv --no-terminal --really-quiet -"
 
 The player is started lazily after the first successful TTS response and chosen by its Content-Type.
@@ -134,6 +138,43 @@ def parse_extra_headers(spec: str) -> dict:
 EXTRA_HEADERS = parse_extra_headers(os.environ.get("TTS_EXTRA_HEADERS", ""))
 
 
+PROTECTED_BODY_KEYS = {"input", "stream"}
+MAX_EXTRA_BODY = 8 * 1024
+
+
+def parse_extra_body(spec: str) -> dict:
+    if not spec.strip():
+        return {}
+    if len(spec) > MAX_EXTRA_BODY:
+        log(f"TTS_EXTRA_BODY larger than {MAX_EXTRA_BODY} bytes, ignored", "warn")
+        return {}
+    try:
+        obj = json.loads(spec)
+    except ValueError:
+        log("TTS_EXTRA_BODY is not valid JSON, ignored", "warn")
+        return {}
+    if not isinstance(obj, dict):
+        log("TTS_EXTRA_BODY must be a JSON object, ignored", "warn")
+        return {}
+    blocked = sorted(PROTECTED_BODY_KEYS & set(obj))
+    if blocked:
+        log(f"TTS_EXTRA_BODY may not override {blocked}, ignoring those keys", "warn")
+    return {k: v for k, v in obj.items() if k not in PROTECTED_BODY_KEYS}
+
+
+TTS_INSTRUCTIONS = os.environ.get("TTS_INSTRUCTIONS", "").strip()
+EXTRA_BODY = parse_extra_body(os.environ.get("TTS_EXTRA_BODY", ""))
+
+
+def tts_body(sentence: str) -> dict:
+    body = {"model": TTS_MODEL, "voice": TTS_VOICE, "response_format": TTS_FORMAT}
+    if TTS_INSTRUCTIONS:
+        body["instructions"] = TTS_INSTRUCTIONS
+    body.update(EXTRA_BODY)
+    body.update(input=sentence, stream=True)
+    return body
+
+
 def auth_headers() -> dict:
     return {"Authorization": f"Bearer {TOKEN}"} if TOKEN else {}
 
@@ -197,7 +238,7 @@ class TTSError(Exception):
 
 def tts_open(sentence: str, deadline: float | None = None):
     """POST one sentence; retry 5xx/connection errors before the first byte. Returns (response, content_type, first_chunk)."""
-    body = {"model": TTS_MODEL, "voice": TTS_VOICE, "input": sentence, "response_format": TTS_FORMAT, "stream": True}
+    body = tts_body(sentence)
     h = {"Content-Type": "application/json", **EXTRA_HEADERS}
     if TTS_KEY:
         h["Authorization"] = f"Bearer {TTS_KEY}"
@@ -213,8 +254,9 @@ def tts_open(sentence: str, deadline: float | None = None):
         req = urllib.request.Request(TTS_URL + "/audio/speech", data=json.dumps(body).encode(), headers=h, method="POST")
         r = None
         t0 = time.monotonic()
-        log(f"tts request url={safe_url(TTS_URL)}/audio/speech model={TTS_MODEL} voice={TTS_VOICE} format={TTS_FORMAT} "
-            f"headers={sorted(set(h) - {'Authorization'})} attempt={attempt + 1}", "debug")
+        log(f"tts request url={safe_url(TTS_URL)}/audio/speech model={body.get('model')} voice={body.get('voice')} "
+            f"format={body.get('response_format')} headers={sorted(set(h) - {'Authorization'})} "
+            f"instructions={TTS_INSTRUCTIONS!r} extra_body_keys={sorted(EXTRA_BODY)} attempt={attempt + 1}", "debug")
         try:
             r = OPENER.open(req, timeout=30)
             first = r.read(4096)
@@ -442,6 +484,8 @@ def main() -> int:
         return 2
     if LOG_LEVEL == LEVELS["debug"]:
         log("WARNING: log level debug: message text is written to the log", "always")
+    if TTS_INSTRUCTIONS or EXTRA_BODY:
+        log(f"tts extras: instructions={'yes' if TTS_INSTRUCTIONS else 'no'}, extra_body keys={sorted(EXTRA_BODY)}")
     main_loop()
     return 0
 
