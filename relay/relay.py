@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -25,6 +26,7 @@ VERSION = "0.1.0"
 KEEPALIVE_S = 15
 MAX_BODY = 64 * 1024
 MAX_TEXT = 4000
+MAX_TRACKED = 1000
 
 
 def log(msg: str) -> None:
@@ -55,10 +57,15 @@ class State:
         self.connections: dict[str, int] = collections.defaultdict(int)
         self.muted: dict[str, set[str]] = {"all": set(), "session": set(), "device": set(), "group": set()}
         self.history: collections.deque = collections.deque(maxlen=200)
-        self.by_id: dict[str, dict] = {}
+        self.by_id: collections.OrderedDict[str, dict] = collections.OrderedDict()
+        self.gen: dict[str, int] = collections.defaultdict(int)
 
     # ---- resolution -------------------------------------------------
     def resolve(self, target: str) -> list[str]:
+        with self.lock:
+            return self._resolve(target)
+
+    def _resolve(self, target: str) -> list[str]:
         if target == "all":
             return list(self.devices)
         if target == "active":
@@ -71,6 +78,10 @@ class State:
         return []
 
     def is_muted(self, device: str, groups: list[str], session_id: str | None) -> str | None:
+        with self.lock:
+            return self._is_muted(device, groups, session_id)
+
+    def _is_muted(self, device: str, groups: list[str], session_id: str | None) -> str | None:
         if "*" in self.muted["all"]:
             return "all"
         if session_id and session_id in self.muted["session"]:
@@ -84,14 +95,28 @@ class State:
 
     # ---- enqueue ----------------------------------------------------
     def speak(self, body: dict) -> dict:
+        with self.lock:
+            return self._speak(body)
+
+    @staticmethod
+    def _opt_str(v) -> str | None:
+        return None if v is None or v == "" else str(v)
+
+    def _speak(self, body: dict) -> dict:
         text = str(body.get("text", "")).strip()
         if not text:
             raise ValueError("text required")
         text = text[:MAX_TEXT]
-        source = str(body.get("source", "")) or None
+        source = self._opt_str(body.get("source"))
         target = str(body.get("target") or self.routes.get(source or "", self.default_route))
-        session_id = body.get("session_id")
-        ttl = int(body.get("ttl_s") or self.default_ttl)
+        session_id = self._opt_str(body.get("session_id"))
+        priority = self._opt_str(body.get("priority")) or "normal"
+        play_at = self._opt_str(body.get("play_at"))
+        try:
+            ttl = int(float(body.get("ttl_s") or self.default_ttl))
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("ttl_s must be a number") from None
+        ttl = max(1, min(ttl, 3600))
         now = time.time()
         devices = self.resolve(target)
         if not devices:
@@ -108,9 +133,9 @@ class State:
                 "session_id": session_id,
                 "target": target,
                 "text": text,
-                "priority": body.get("priority", "normal"),
+                "priority": priority,
                 "ttl_s": ttl,
-                "play_at": body.get("play_at"),
+                "play_at": play_at,
                 "volume": cfg.get("volume", 1.0),
                 "latency_offset_ms": cfg.get("latency_offset_ms", 0),
                 "created": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
@@ -119,6 +144,8 @@ class State:
             rec = {"id": ev["id"], "device": dev, "target": target, "session_id": session_id,
                    "status": "muted:" + muted if muted else "queued", "ts": now}
             self.by_id[ev["id"]] = rec
+            while len(self.by_id) > MAX_TRACKED:
+                self.by_id.popitem(last=False)
             self.history.append(rec)
             if not muted:
                 try:
@@ -129,13 +156,18 @@ class State:
         return {"target": target, "events": result}
 
     def ack(self, evid: str, device: str, status: str = "acked") -> bool:
-        rec = self.by_id.get(evid)
-        if not rec or rec["device"] != device:
-            return False
-        rec["status"] = status
-        return True
+        with self.lock:
+            rec = self.by_id.get(evid)
+            if not rec or rec["device"] != device:
+                return False
+            rec["status"] = status
+            return True
 
     def set_mute(self, scope: str, ident: str, muted: bool) -> None:
+        with self.lock:
+            self._set_mute(scope, ident, muted)
+
+    def _set_mute(self, scope: str, ident: str, muted: bool) -> None:
         if scope not in self.muted:
             raise ValueError("scope must be all|session|device|group")
         if scope == "all":
@@ -146,7 +178,34 @@ class State:
             raise ValueError(f"unknown group {ident!r}")
         (self.muted[scope].add if muted else self.muted[scope].discard)(ident)
 
+    def muted_view(self) -> dict:
+        with self.lock:
+            return {k: sorted(v) for k, v in self.muted.items()}
+
+    def touch(self, dev: str) -> None:
+        with self.lock:
+            self.last_seen[dev] = time.time()
+
+    def attach(self, dev: str) -> int:
+        with self.lock:
+            self.gen[dev] += 1
+            self.connections[dev] += 1
+            self.last_seen[dev] = time.time()
+            return self.gen[dev]
+
+    def detach(self, dev: str) -> None:
+        with self.lock:
+            self.connections[dev] -= 1
+
+    def superseded(self, dev: str, gen: int) -> bool:
+        with self.lock:
+            return self.gen[dev] != gen
+
     def snapshot(self) -> dict:
+        with self.lock:
+            return self._snapshot()
+
+    def _snapshot(self) -> dict:
         now = time.time()
         return {
             "version": VERSION,
@@ -166,6 +225,7 @@ def make_handler(state: State, tokens: list[str], no_auth: bool):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = f"claude-voice-relay/{VERSION}"
+        timeout = 30   # socket timeout: half-open peers and slowloris
 
         def log_message(self, fmt, *args):  # never log headers/tokens
             log(f"{self.client_address[0]} {fmt % args}")
@@ -185,16 +245,20 @@ def make_handler(state: State, tokens: list[str], no_auth: bool):
             hdr = self.headers.get("Authorization", "")
             if not hdr.startswith("Bearer "):
                 return False
-            given = hdr[7:].strip().encode()
+            given = hashlib.sha256(hdr[7:].strip().encode()).digest()
             ok = False
-            for t in tokens:  # no early exit: constant-ish time
-                ok |= hmac.compare_digest(given, t.encode())
+            for t in tokens:  # no early exit; equal-length digests
+                ok |= hmac.compare_digest(given, hashlib.sha256(t.encode()).digest())
             return ok
 
         def _body(self) -> dict:
-            n = int(self.headers.get("Content-Length") or 0)
-            if n > MAX_BODY:
-                raise ValueError("body too large")
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = -1
+            if n < 0 or n > MAX_BODY:
+                self.close_connection = True   # body unread: connection unusable
+                raise ValueError("invalid or too large Content-Length")
             raw = self.rfile.read(n) if n else b"{}"
             obj = json.loads(raw or b"{}")
             if not isinstance(obj, dict):
@@ -211,7 +275,35 @@ def make_handler(state: State, tokens: list[str], no_auth: bool):
             return True
 
         # -- routes
+        def _safe(self, fn) -> None:
+            try:
+                fn()
+            except (OSError, ValueError) as e:
+                if isinstance(e, OSError):
+                    self.close_connection = True
+                    return
+                self._internal(e)
+            except Exception as e:
+                self._internal(e)
+
+        def _internal(self, e: Exception) -> None:
+            log(f"{self.client_address[0]} internal error: {type(e).__name__}: {e}")
+            self.close_connection = True
+            if not self._streaming:
+                try:
+                    self._json(500, {"error": "internal error"})
+                except OSError:
+                    pass
+
+        _streaming = False
+
         def do_GET(self):
+            self._safe(self._get)
+
+        def do_POST(self):
+            self._safe(self._post)
+
+        def _get(self):
             u = urlparse(self.path)
             if u.path == "/healthz":
                 return self._json(200, {"ok": True, "version": VERSION})
@@ -226,7 +318,7 @@ def make_handler(state: State, tokens: list[str], no_auth: bool):
                 return self._stream(dev)
             self._json(404, {"error": "not found"})
 
-        def do_POST(self):
+        def _post(self):
             if not self._guard():
                 return
             u = urlparse(self.path)
@@ -239,7 +331,7 @@ def make_handler(state: State, tokens: list[str], no_auth: bool):
                     return self._json(200 if ok else 404, {"ok": ok})
                 if u.path == "/v1/mute":
                     state.set_mute(str(body.get("scope", "")), str(body.get("id", "")), bool(body.get("muted", True)))
-                    return self._json(200, {"muted": {k: sorted(v) for k, v in state.muted.items()}})
+                    return self._json(200, {"muted": state.muted_view()})
             except LookupError as e:
                 return self._json(404, {"error": str(e)})
             except (ValueError, json.JSONDecodeError) as e:
@@ -247,28 +339,33 @@ def make_handler(state: State, tokens: list[str], no_auth: bool):
             self._json(404, {"error": "not found"})
 
         def _stream(self, dev: str) -> None:
+            self._streaming = True
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("X-Accel-Buffering", "no")
             self.send_header("Connection", "keep-alive")
             self.end_headers()
-            with state.lock:
-                state.connections[dev] += 1
-                state.last_seen[dev] = time.time()
+            gen = state.attach(dev)   # newest connection per device wins
             log(f"device {dev} connected")
             q = state.queues[dev]
             try:
                 self.wfile.write(b": connected\n\n")
                 self.wfile.flush()
-                while True:
+                last_write = time.monotonic()
+                while not state.superseded(dev, gen):
                     try:
-                        ev = q.get(timeout=KEEPALIVE_S)
+                        ev = q.get(timeout=1)
                     except queue.Empty:
-                        state.last_seen[dev] = time.time()
-                        self.wfile.write(b": keepalive\n\n")
-                        self.wfile.flush()
+                        state.touch(dev)
+                        if time.monotonic() - last_write >= KEEPALIVE_S:
+                            self.wfile.write(b": keepalive\n\n")
+                            self.wfile.flush()
+                            last_write = time.monotonic()
                         continue
+                    if state.superseded(dev, gen):
+                        q.put(ev)
+                        break
                     if time.time() > ev["_expires"]:
                         state.ack(ev["id"], dev, "expired")
                         continue
@@ -280,13 +377,13 @@ def make_handler(state: State, tokens: list[str], no_auth: bool):
                     except OSError:
                         q.put(ev)  # not delivered: keep for reconnect (TTL still applies)
                         raise
+                    last_write = time.monotonic()
                     state.ack(ev["id"], dev, "delivered")
-                    state.last_seen[dev] = time.time()
+                    state.touch(dev)
             except (OSError, ValueError):
                 pass
             finally:
-                with state.lock:
-                    state.connections[dev] -= 1
+                state.detach(dev)
                 log(f"device {dev} disconnected")
                 self.close_connection = True
 

@@ -6,7 +6,7 @@ services:
     volumes:
       - ./relay/relay.toml:/config/relay.toml:ro
     ports:
-      - "127.0.0.1:8787:8787"       # expose via Pangolin/reverse proxy with TLS, not directly
+      - "${RELAY_BIND:-127.0.0.1}:8787:8787"       # expose via Pangolin/reverse proxy with TLS, not directly
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
