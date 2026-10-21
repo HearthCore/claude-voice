@@ -2,7 +2,8 @@
 """Claude Code hook -> claude-voice relay. Never blocks the session, never fails loudly.
 
 Events: Stop (speaks `last_assistant_message`, falls back to parsing the transcript), Notification (speaks `message`).
-Env: CLAUDE_VOICE_URL, CLAUDE_VOICE_TOKEN, CLAUDE_VOICE_TARGET (default: relay route),
+Env: CLAUDE_VOICE_URL, CLAUDE_VOICE_TOKEN, CLAUDE_VOICE_TARGET (default: relay route); if unset, the plugin
+     userConfig values CLAUDE_PLUGIN_OPTION_RELAY_URL / _RELAY_TOKEN / _TARGET are used (explicit env wins),
      CLAUDE_VOICE_MAX_CHARS (default 500), CLAUDE_VOICE_TIMEOUT (default 2), CLAUDE_VOICE_RETRIES (default 1)
      CLAUDE_VOICE_STOP_MODE=final|all (default final): "final" skips a Stop while a background subagent is still
      running (interim message; the real final Stop follows). Running background shells do not suppress.
@@ -10,10 +11,12 @@ Env: CLAUDE_VOICE_URL, CLAUDE_VOICE_TOKEN, CLAUDE_VOICE_TARGET (default: relay r
      `claude`, found via /proc ancestry; e.g. `claude -p` spawned by another plugin) never speak.
      CLAUDE_VOICE_NOTIFY_TYPES (default permission_prompt,elicitation_dialog,agent_needs_input; "all" | "none"):
      Notification types that are spoken.
+     CLAUDE_VOICE_DEDUP=0 disables the duplicate guard (two plugin copies firing for the same event send once).
      CLAUDE_VOICE_LOG_LEVEL=off|error|warn|info|debug (default off): JSON lines appended to
      $CLAUDE_VOICE_STATE_DIR/hook.log (0600, rotated at 256 KiB to hook.log.1). info = decision + metadata + char
      count; debug adds raw/cleaned text and the posted payload. Local file only; token is never logged.
 """
+import hashlib
 import ipaddress
 import json
 import os
@@ -55,6 +58,41 @@ def _write(level: str, event: str, **fields) -> None:
     fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def cfg(name: str) -> str:
+    """Explicit CLAUDE_VOICE_<NAME> env first, then the plugin userConfig value."""
+    opt = {"URL": "RELAY_URL", "TOKEN": "RELAY_TOKEN", "TARGET": "TARGET"}[name]
+    return os.environ.get(f"CLAUDE_VOICE_{name}") or os.environ.get(f"CLAUDE_PLUGIN_OPTION_{opt}") or ""
+
+
+DEDUP_WINDOW_S, DEDUP_KEEP_S = 120, 600
+
+
+def duplicate(data: dict, event: str, text: str) -> bool:
+    """True if another copy of this hook already sent the same thing. Any FS error -> False (never lose speech)."""
+    if os.environ.get("CLAUDE_VOICE_DEDUP", "1") == "0":
+        return False
+    try:
+        key = hashlib.sha256("|".join(str(x) for x in (data.get("session_id"), data.get("prompt_id"), event, text)).encode()).hexdigest()
+        d = os.path.join(STATE_DIR, "sent")
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, key)
+        now = time.time()
+        try:
+            os.close(os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            dup = False
+        except FileExistsError:
+            dup = now - os.path.getmtime(p) < DEDUP_WINDOW_S
+            if not dup:
+                os.utime(p, None)
+        if now % 20 < 1:   # opportunistic cleanup
+            for e in os.scandir(d):
+                if now - e.stat().st_mtime > DEDUP_KEEP_S:
+                    os.unlink(e.path)
+        return dup
+    except Exception:
+        return False
 
 
 PROC = "/proc"
@@ -237,7 +275,7 @@ def main() -> int:
         data = json.load(sys.stdin)
     except ValueError:
         return 0
-    url = os.environ.get("CLAUDE_VOICE_URL")
+    url = cfg("URL")
     if not url:
         return 0
     if not isinstance(data, dict):
@@ -282,14 +320,17 @@ def main() -> int:
         return 0
     payload = {"text": text, "session_id": sid, "source": "claude-code",
                "priority": "high" if event == "Notification" else "normal"}
-    if os.environ.get("CLAUDE_VOICE_TARGET"):
-        payload["target"] = os.environ["CLAUDE_VOICE_TARGET"]
+    if cfg("TARGET"):
+        payload["target"] = cfg("TARGET")
     timeout = env_num("CLAUDE_VOICE_TIMEOUT", "2", float)
     retries = max(0, env_num("CLAUDE_VOICE_RETRIES", "1", int))
-    token = os.environ.get("CLAUDE_VOICE_TOKEN", "")
+    token = cfg("TOKEN")
 
     if token and not creds_ok(url):
         decide(data, "skip:insecure_url", source, raw, text)
+        return 0
+    if duplicate(data, event, text):
+        decide(data, "skip:duplicate", source, raw, text)
         return 0
     decide(data, "send", source, raw, text, payload)
     if hasattr(os, "fork") and not os.environ.get("CLAUDE_VOICE_SYNC"):

@@ -1,0 +1,14 @@
+{
+  "name": "hc-voice-relay-claude",
+  "description": "Plugins by HearthCore",
+  "owner": { "name": "HearthCore" },
+  "plugins": [
+    {
+      "name": "voice-relay",
+      "source": ".",
+      "description": "Speaks Claude Code replies and notifications on your devices via a self-hosted relay and a local TTS sidecar.",
+      "category": "productivity",
+      "tags": ["tts", "voice", "speech", "notifications", "hooks"]
+    }
+  ]
+}

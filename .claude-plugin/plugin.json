@@ -1,7 +1,29 @@
 {
-  "name": "claude-voice",
-  "version": "0.1.7",
-  "description": "Speak Claude Code replies on your devices via a relay + local sidecar (OpenAI-compatible TTS, streaming, device groups).",
-  "author": { "name": "Timo" },
-  "license": "MIT"
+  "name": "voice-relay",
+  "displayName": "Voice Relay",
+  "version": "0.1.8",
+  "description": "Speaks Claude Code replies on your devices via a self-hosted relay and a local TTS sidecar.",
+  "author": { "name": "HearthCore" },
+  "homepage": "https://github.com/HearthCore/hc-voice-relay-claude",
+  "repository": "https://github.com/HearthCore/hc-voice-relay-claude",
+  "license": "MIT",
+  "keywords": ["tts", "voice", "speech", "notifications", "hooks"],
+  "userConfig": {
+    "relay_url": {
+      "type": "string",
+      "title": "Relay URL",
+      "description": "e.g. https://relay.example.com/speak - leave empty to use CLAUDE_VOICE_URL"
+    },
+    "relay_token": {
+      "type": "string",
+      "title": "Relay token",
+      "description": "Bearer token of your relay (stored securely)",
+      "sensitive": true
+    },
+    "target": {
+      "type": "string",
+      "title": "Target",
+      "description": "Device or group name; empty = relay routing"
+    }
+  }
 }

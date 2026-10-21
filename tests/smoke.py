@@ -242,6 +242,9 @@ home = ["a", "b"]
     test_logging.run()
     import test_update
     test_update.run()
+    test_hook.run_round7()
+    import test_manifest
+    test_manifest.run()
     print(f"\n{len(PASSED)} checks passed")
 
 

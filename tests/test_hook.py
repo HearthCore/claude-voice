@@ -338,3 +338,61 @@ def run_round5():
     c = speak.clean("<system-reminder foo=\"1\">weg</system-reminder>Bleibt. a < b > c und <b>fett</b>", 500)
     check("plain angle brackets / simple tags survive", c.startswith("Bleibt.") and "weg" not in c and "a" in c and "fett" in c)
     cap.shutdown()
+
+
+def run_round7():
+    posts = []
+
+    class Cap(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            posts.append((json.loads(self.rfile.read(int(self.headers["Content-Length"]))), self.headers.get("Authorization")))
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    cap = http.server.ThreadingHTTPServer(("127.0.0.1", free_port()), Cap)
+    threading.Thread(target=cap.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{cap.server_address[1]}"
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_VOICE_URL", "CLAUDE_VOICE_TOKEN", "CLAUDE_VOICE_TARGET", "CLAUDE_PLUGIN_OPTION"))}
+    pl = {"hook_event_name": "Stop", "session_id": "r7", "prompt_id": "p", "last_assistant_message": "Konfig."}
+
+    def fire(extra, payload=pl):
+        n0 = len(posts)
+        run_hook(payload, {**clean_env, "CLAUDE_VOICE_STATE_DIR": tempfile.mkdtemp(), "CLAUDE_VOICE_SYNC": "1", **extra})
+        return posts[n0:]
+
+    got = fire({"CLAUDE_PLUGIN_OPTION_RELAY_URL": url, "CLAUDE_PLUGIN_OPTION_RELAY_TOKEN": "o" * 20, "CLAUDE_PLUGIN_OPTION_TARGET": "tv"})
+    check("userConfig env fallback: url, token, target", len(got) == 1 and got[0][1] == "Bearer " + "o" * 20 and got[0][0]["target"] == "tv")
+    got = fire({"CLAUDE_VOICE_URL": url, "CLAUDE_VOICE_TOKEN": "e" * 20, "CLAUDE_VOICE_TARGET": "box", "CLAUDE_PLUGIN_OPTION_RELAY_URL": "http://127.0.0.1:1",
+                "CLAUDE_PLUGIN_OPTION_RELAY_TOKEN": "o" * 20, "CLAUDE_PLUGIN_OPTION_TARGET": "tv"})
+    check("explicit env wins over userConfig", len(got) == 1 and got[0][1] == "Bearer " + "e" * 20 and got[0][0]["target"] == "box")
+    check("no url anywhere -> no-op", fire({}) == [])
+    d = tempfile.mkdtemp()
+    base = {"CLAUDE_VOICE_URL": url, "CLAUDE_VOICE_STATE_DIR": d, "CLAUDE_VOICE_DEDUP": "1", "CLAUDE_VOICE_LOG_LEVEL": "info"}
+
+    def two(payload_a, payload_b):
+        n0 = len(posts)
+        ps = [subprocess.Popen([sys.executable, f"{ROOT}/hooks/speak.py"], env={**clean_env, **base, "CLAUDE_VOICE_SYNC": "1"}, stdin=subprocess.PIPE,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for _ in range(2)]
+        for p_, pay in zip(ps, (payload_a, payload_b)):
+            p_.stdin.write(json.dumps(pay).encode())
+            p_.stdin.close()
+        for p_ in ps:
+            p_.wait(timeout=10)
+        return len(posts) - n0
+
+    check("same event from two copies (concurrent) -> one POST", two(pl, pl) == 1)
+    check("repeat within window -> still suppressed", two(pl, pl) == 0)
+    check("different text -> two POSTs", two({**pl, "last_assistant_message": "Anderer Text A."}, {**pl, "last_assistant_message": "Anderer Text B."}) == 2)
+    check("different session -> two POSTs", two({**pl, "last_assistant_message": "Gleich."}, {**pl, "last_assistant_message": "Gleich.", "session_id": "r8"}) == 2)
+    check("duplicate decision logged", "skip:duplicate" in open(os.path.join(d, "hook.log"), encoding="utf-8").read())
+    # FS error -> send anyway
+    blocker = os.path.join(tempfile.mkdtemp(), "file")
+    open(blocker, "w").close()
+    n0 = len(posts)
+    run_hook({**pl, "last_assistant_message": "Trotz Fehler."}, {**clean_env, "CLAUDE_VOICE_URL": url, "CLAUDE_VOICE_STATE_DIR": blocker, "CLAUDE_VOICE_SYNC": "1"})
+    check("guard failure never loses speech", len(posts) == n0 + 1)
+    cap.shutdown()

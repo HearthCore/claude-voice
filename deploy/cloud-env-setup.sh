@@ -2,20 +2,20 @@
 # claude-voice: setup script for a claude.ai cloud environment (e.g. "GDev").
 #
 # Paste into the environment's "Setup script" field, or pin a release in one line:
-#   curl -fsSL https://raw.githubusercontent.com/HearthCore/claude-voice/<tag>/deploy/cloud-env-setup.sh | bash -s -- <tag> || true
+#   curl -fsSL https://raw.githubusercontent.com/HearthCore/hc-voice-relay-claude/<tag>/deploy/cloud-env-setup.sh | bash -s -- <tag> || true
 # The ref is taken from the first argument, else CLAUDE_VOICE_REF, else main. Pass it as argument:
 # environment variables are not reliably visible to setup scripts.
 # Runs as root before Claude Code starts. It is idempotent and NEVER fails the session:
 # every error is logged and the script exits 0.
 #
 # Activation: set CLAUDE_CODE_PLUGIN_DIRS=~/.claude-plugins/claude-voice in the
-# environment variables (the env equivalent of --plugin-dir, loads as claude-voice@inline).
+# environment variables (the env equivalent of --plugin-dir, loads as voice-relay@inline).
 #
 # Later updates need no change of this (cached) script: hooks/self_update.py moves the detached checkout to
-# CLAUDE_VOICE_REF at session start, or on demand via /claude-voice:voice update <tag>.
+# CLAUDE_VOICE_REF at session start, or on demand via /voice-relay:voice update <tag>.
 #
 # Env (all optional, no secrets in this file):
-#   CLAUDE_VOICE_REPO        default https://github.com/HearthCore/claude-voice.git
+#   CLAUDE_VOICE_REPO        default https://github.com/HearthCore/hc-voice-relay-claude.git
 #   CLAUDE_VOICE_REF         branch or tag, default main. Recommended: a release tag (e.g. v0.1.0),
 #                            so a moving branch never runs unreviewed code in every session.
 #   CLAUDE_VOICE_PLUGIN_DIR  default $HOME/.claude-plugins/claude-voice
@@ -24,7 +24,7 @@
 [ -n "${BASH_VERSION:-}" ] || { echo "[claude-voice-setup] needs bash, skipping"; exit 0; }
 # No `set -e/-u`: an unbound variable would abort the shell and with it the session start.
 
-REPO="${CLAUDE_VOICE_REPO:-https://github.com/HearthCore/claude-voice.git}"
+REPO="${CLAUDE_VOICE_REPO:-https://github.com/HearthCore/hc-voice-relay-claude.git}"
 REF="${1:-${CLAUDE_VOICE_REF:-main}}"
 DIR="${CLAUDE_VOICE_PLUGIN_DIR:-$HOME/.claude-plugins/claude-voice}"
 

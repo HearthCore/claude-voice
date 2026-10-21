@@ -14,6 +14,32 @@ Claude Code (lokal oder Cloud)
                           → eigenes TTS (Stimme/Modell pro Gerät) → mpv
 ```
 
+## Installation
+
+Reihenfolge: Relay → Sidecar → Plugin → Konfiguration. Der Plugin-Name ist `voice-relay` (der Präfix `claude-` ist von Anthropic reserviert); der Marketplace heißt `hc-voice-relay-claude`.
+
+1. **Relay betreiben** (Docker): `.env` mit Token anlegen, `relay/relay.toml` aus `relay/relay.example.toml`, dann `docker compose up -d --build`. Details: Abschnitt „Produktion“ unten.
+2. **Sidecar auf dem Wiedergabegerät** (systemd-User-Service): Abschnitt „Notebook (Omarchy)“ unten.
+3. **Plugin installieren**
+   - **A) claude.ai:** Customize → Plugins → Add marketplace `HearthCore/hc-voice-relay-claude` → „Voice Relay“ installieren. Auf dem Konto installierte Plugins werden in Claude Code als `voice-relay@synced` übernommen.
+   - **B) CLI:** `claude plugin marketplace add HearthCore/hc-voice-relay-claude`, dann `claude plugin install voice-relay@hc-voice-relay-claude`.
+   - **C) claude.ai-Cloud-Environment:** Setup-Script (`curl -fsSL …/deploy/cloud-env-setup.sh | bash -s -- <tag>`) plus `CLAUDE_CODE_PLUGIN_DIRS=~/.claude-plugins/claude-voice`, siehe Abschnitt „Cloud“.
+   - **D) Entwicklung:** `claude --plugin-dir .`
+4. **Konfigurieren:** entweder die Abfrage bei der Installation bzw. `/config` (userConfig: Relay URL, Relay token, Target; der Token liegt im sicheren Speicher) oder die Env-Variablen `CLAUDE_VOICE_URL` / `CLAUDE_VOICE_TOKEN` / `CLAUDE_VOICE_TARGET`. **Env hat Vorrang** vor userConfig.
+
+### Wo es funktioniert
+
+| Umgebung | Status |
+|---|---|
+| Claude Code (Terminal, IDE, Desktop-Code-Tab) | ✅ Hooks |
+| Cowork | ✅ Hooks (ungetestet) |
+| Cloud-Sessions per Setup-Script | ✅ |
+| claude.ai Chat | ❌ Chat ignoriert Hooks; passives Vorlesen ist dort nicht möglich (nur der `/voice-relay:voice`-Befehl als Skill) |
+
+### Migration vom alten Plugin-Namen `claude-voice`
+
+Die Befehle heißen jetzt `/voice-relay:voice`. Sind das alte Inline-Plugin und das neue Marketplace-Plugin gleichzeitig aktiv, verhindert der Duplikat-Guard doppeltes Sprechen (gleiche Session/Prompt/Event/Text innerhalb von 120 s wird nur einmal gesendet; `CLAUDE_VOICE_DEDUP=0` schaltet ihn ab). Trotzdem eines der beiden entfernen.
+
 ## Quickstart lokal (ohne Auth, nur Loopback)
 
 ```bash
@@ -103,7 +129,7 @@ Stop: spricht bevorzugt `last_assistant_message` (Transcript nur Fallback); Noti
 
 | Variable | Default | Bedeutung |
 |---|---|---|
-| `CLAUDE_VOICE_URL` | – | Relay-URL; ohne sie ist der Hook ein No-op |
+| `CLAUDE_VOICE_URL` | – | Relay-URL (Fallback: userConfig `relay_url` als `CLAUDE_PLUGIN_OPTION_RELAY_URL`); ohne sie ist der Hook ein No-op |
 | `CLAUDE_VOICE_TOKEN` | – | Bearer-Token (in der Cloud besser per Network Secret, s. u.) |
 | `CLAUDE_VOICE_TARGET` | Relay-Routing | Gerät/Gruppe |
 | `CLAUDE_VOICE_MAX_CHARS` | `500` | Max. gesprochene Zeichen |
@@ -113,6 +139,7 @@ Stop: spricht bevorzugt `last_assistant_message` (Transcript nur Fallback); Noti
 | `CLAUDE_VOICE_NESTED` | `skip` | `skip`: Hooks verschachtelter Hilfs-Sessions (ein `claude` unterhalb eines anderen `claude`, z. B. `claude -p` aus dem Hook eines anderen Plugins; Erkennung über /proc-Abstammung, nur Linux) sprechen nie; `speak`: immer |
 | `CLAUDE_VOICE_NOTIFY_TYPES` | `permission_prompt,elicitation_dialog,agent_needs_input` | Notification-Typen, die gesprochen werden; `all` = alle (auch ohne Typ), `none` = keine |
 | `CLAUDE_VOICE_AUTO_UPDATE` | an | `0` schaltet das automatische Update beim Session-Start ab (das explizite `voice update` bleibt möglich) |
+| `CLAUDE_VOICE_DEDUP` | an | `0` schaltet den Duplikat-Guard ab (zwei Plugin-Kopien senden dasselbe Event nur einmal) |
 | `CLAUDE_VOICE_STOP_MODE` | `final` | `final`: Stop-Zwischenmeldungen bei laufenden Hintergrund-Subagents (`background_tasks`) nicht sprechen; `all`: jedes Stop sprechen |
 | `CLAUDE_VOICE_LOG_LEVEL` | `off` | `off\|error\|warn\|info\|debug`; JSON-Zeilen in `$CLAUDE_VOICE_STATE_DIR/hook.log` (0600, Rotation bei 256 KiB → `hook.log.1`) |
 
@@ -124,9 +151,9 @@ Slash-Command: `/voice status | mute | unmute | speak <text>`.
 
 | Schritt | Wert |
 |---|---|
-| Setup-Script | `curl -fsSL https://raw.githubusercontent.com/HearthCore/claude-voice/<Tag>/deploy/cloud-env-setup.sh \| bash -s -- <Tag> \|\| true` (Tag als Argument: Environment-Variablen sind im Setup-Script nicht zuverlässig sichtbar; Checkout immer detached + Markierung `.git/claude-voice-managed`) oder Inhalt von `deploy/cloud-env-setup.sh` (läuft als root vor Claude Code; endet immer mit Exit 0; idempotenter Clone/Fetch nach `~/.claude-plugins/claude-voice`; Environment-Cache ~7 Tage) |
-| Updates | `CLAUDE_VOICE_REF` ändern → greift beim nächsten Session-Start automatisch (`hooks/self_update.py`, nur bei detached oder vom Setup-Script markiertem Checkout ohne lokale Änderungen; Entwicklungs-Checkouts auf einem Branch bleiben unangetastet); sofort: `/claude-voice:voice update <tag>`; `/claude-voice:voice version` zeigt den Stand. Hook-Skripte werden bei jedem Aufruf frisch von der Platte geladen, nur Änderungen an `hooks.json` brauchen eine neue Session. Abschalten: `CLAUDE_VOICE_AUTO_UPDATE=0`. Immer einen **Tag** als Ref verwenden: ein bereits lokal bekannter Branch (z. B. `main`) wird nicht erneut geholt |
-| Aktivierung | Env `CLAUDE_CODE_PLUGIN_DIRS=~/.claude-plugins/claude-voice` (Env-Pendant zu `--plugin-dir`, Claude Code ≥ 2.1.280, Plugin lädt als `claude-voice@inline`); `extraKnownMarketplaces` aus `.claude/settings.json` funktioniert in Cloud-Sessions **nicht** |
+| Setup-Script | `curl -fsSL https://raw.githubusercontent.com/HearthCore/hc-voice-relay-claude/<Tag>/deploy/cloud-env-setup.sh \| bash -s -- <Tag> \|\| true` (Tag als Argument: Environment-Variablen sind im Setup-Script nicht zuverlässig sichtbar; Checkout immer detached + Markierung `.git/claude-voice-managed`) oder Inhalt von `deploy/cloud-env-setup.sh` (läuft als root vor Claude Code; endet immer mit Exit 0; idempotenter Clone/Fetch nach `~/.claude-plugins/claude-voice`; Environment-Cache ~7 Tage) |
+| Updates | `CLAUDE_VOICE_REF` ändern → greift beim nächsten Session-Start automatisch (`hooks/self_update.py`, nur bei detached oder vom Setup-Script markiertem Checkout ohne lokale Änderungen; Entwicklungs-Checkouts auf einem Branch bleiben unangetastet); sofort: `/voice-relay:voice update <tag>`; `/voice-relay:voice version` zeigt den Stand. Hook-Skripte werden bei jedem Aufruf frisch von der Platte geladen, nur Änderungen an `hooks.json` brauchen eine neue Session. Abschalten: `CLAUDE_VOICE_AUTO_UPDATE=0`. Immer einen **Tag** als Ref verwenden: ein bereits lokal bekannter Branch (z. B. `main`) wird nicht erneut geholt |
+| Aktivierung | Env `CLAUDE_CODE_PLUGIN_DIRS=~/.claude-plugins/claude-voice` (Env-Pendant zu `--plugin-dir`, Claude Code ≥ 2.1.280, Plugin lädt als `voice-relay@inline`); `extraKnownMarketplaces` aus `.claude/settings.json` funktioniert in Cloud-Sessions **nicht** |
 | Env | `CLAUDE_VOICE_URL=https://relay.example.com/speak`, `CLAUDE_VOICE_TOKEN` (oder Network Secret, s. u.), `CLAUDE_VOICE_REF=<Release-Tag>` (Tag pinnen, empfohlen); optional `CLAUDE_VOICE_REPO`, `CLAUDE_VOICE_PLUGIN_DIR` |
 | Privates Repo | `CLAUDE_VOICE_GH_TOKEN` = Fine-grained PAT, nur dieses Repo, Contents read-only (läuft per `GIT_CONFIG_*`-Header, nie in URL/argv/Disk). Alternative: Repo öffentlich machen (enthält keine Secrets), PAT entfällt |
 | Netzwerk | Level „Trusted" erreicht eigene Domains nicht. Entweder Custom-Allowlist mit der Relay-Domain (Token dann als Env `CLAUDE_VOICE_TOKEN`) oder (sicherer) **Network Secret**: Host = Relay-Domain, Header `Authorization`, Prefix `Bearer`, Wert = Relay-Token. Der Agent-Proxy hängt ihn an, der Host ist bei jedem Level erreichbar, der Token gelangt nie in die VM. Dann `CLAUDE_VOICE_TOKEN` **nicht** setzen (Hook sendet keinen Header, Proxy ergänzt ihn) |
@@ -155,7 +182,7 @@ Tokens, Keys und Extra-Header gehen nie über Klartext-http an Nicht-Loopback-Ho
 ## Tests
 
 ```bash
-python3 tests/smoke.py      # 203 Checks: tests/test_relay.py, test_sidecar.py, test_hook.py, test_logging.py
+python3 tests/smoke.py      # 217 Checks: tests/test_relay.py, test_sidecar.py, test_hook.py, test_logging.py, test_update.py, test_manifest.py
 ```
 
 Fake-TTS, tee-/Stub-Player, freie Ports; kein Netzwerk nötig. Repo-Agents: `.claude/agents/reviewer.md` (read-only), `scout.md` (haiku, read-only).
