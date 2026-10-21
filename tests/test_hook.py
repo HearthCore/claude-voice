@@ -93,6 +93,51 @@ def run():
     check("garbage stdin -> exit 0", p.returncode == 0)
     check("hooks.json entries are async", all(h["async"] is True and h["timeout"] == 10
           for ev in json.load(open(f"{ROOT}/hooks/hooks.json"))["hooks"].values() for g in ev for h in g["hooks"]))
+
+    # log levels: off writes nothing; info = decision + metadata + count; debug adds content + payload + POST result
+    def hook_log(level, payload):
+        d = tempfile.mkdtemp()
+        e = {**env, "CLAUDE_VOICE_STATE_DIR": d}
+        if level:
+            e["CLAUDE_VOICE_LOG_LEVEL"] = level
+        run_hook(payload, e)
+        time.sleep(0.5)
+        f = os.path.join(d, "hook.log")
+        return d, [json.loads(l) for l in open(f, encoding="utf-8")] if os.path.exists(f) else []
+
+    stop_in = {"hook_event_name": "Stop", "session_id": "d", "prompt_id": "p1", "stop_reason": "end_turn",
+               "agent_id": "a1", "last_assistant_message": "Zwischenstand: ich prüfe noch."}
+    check("hook log level off (default) writes nothing", hook_log(None, stop_in)[1] == [] and hook_log("off", stop_in)[1] == [])
+    d, recs = hook_log("info", stop_in)
+    dec = [r for r in recs if r["event"] == "decision"]
+    check("hook info: decision + metadata + count, no text", len(dec) == 1 and dec[0]["decision"] == "send" and dec[0]["input"]["prompt_id"] == "p1"
+          and dec[0]["input"]["agent_id"] == "a1" and dec[0]["chars"] == len("Zwischenstand: ich prüfe noch.")
+          and "last_assistant_message" in dec[0]["keys"] and "prüfe" not in open(os.path.join(d, "hook.log"), encoding="utf-8").read())
+    check("hook.log is mode 0600", oct(os.stat(os.path.join(d, "hook.log")).st_mode & 0o777) == "0o600")
+    d, recs = hook_log("debug", stop_in)
+    cont = [r for r in recs if r["event"] == "content"]
+    post_rec = [r for r in recs if r["event"] == "post"]
+    check("hook debug: source, raw, cleaned text, payload and POST result",
+          len(cont) == 1 and cont[0]["source"] == "last_assistant_message" and cont[0]["raw"].startswith("Zwischenstand")
+          and cont[0]["text"] == "Zwischenstand: ich prüfe noch." and cont[0]["payload"]["text"] == cont[0]["text"]
+          and len(post_rec) == 1 and post_rec[0]["result"] == "HTTP 202")
+    _, recs = hook_log("debug", {"hook_event_name": "Stop", "stop_hook_active": True, "last_assistant_message": "x"})
+    check("hook debug records skip reasons", [r["decision"] for r in recs if r["event"] == "decision"] == ["skip:stop_hook_active"])
+    _, recs = hook_log("bogus", stop_in)
+    check("invalid hook log level -> off + one warning", [r["event"] for r in recs] == ["log"] and recs[0]["level"] == "warn")
+    # rotation (white-box)
+    rt = tempfile.mkdtemp()
+    old = (speak.STATE_DIR, speak.LOG_MAX_BYTES)
+    speak.STATE_DIR, speak.LOG_MAX_BYTES = rt, 500
+    os.environ["CLAUDE_VOICE_LOG_LEVEL"] = "info"
+    try:
+        for i in range(20):
+            speak.log("info", "x", pad="p" * 100)
+    finally:
+        speak.STATE_DIR, speak.LOG_MAX_BYTES = old
+        os.environ.pop("CLAUDE_VOICE_LOG_LEVEL")
+    check("hook.log rotates to hook.log.1 (one generation)", sorted(os.listdir(rt)) == ["hook.log", "hook.log.1"]
+          and os.path.getsize(os.path.join(rt, "hook.log")) <= 700)
     cap.shutdown()
 
 
