@@ -7,13 +7,38 @@
   voicectl local mute|unmute [--session SID]                              (client-side flag, instant, offline-safe)
 """
 import argparse
+import ipaddress
 import json
 import os
 import sys
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
 STATE_DIR = os.path.expanduser(os.environ.get("CLAUDE_VOICE_STATE_DIR", "~/.claude-voice"))
+
+
+def creds_ok(url: str) -> bool:
+    """Tokens only go over https, or to a loopback host."""
+    try:
+        u = urlsplit(url)
+        host = u.hostname or ""
+    except ValueError:
+        return False
+    if u.scheme == "https":
+        return True
+    try:
+        return u.scheme == "http" and (host == "localhost" or ipaddress.ip_address(host).is_loopback)
+    except ValueError:
+        return False
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **kw):   # a redirect must never carry the token along
+        return None
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
 
 
 def call(method: str, path: str, body: dict | None = None) -> dict:
@@ -22,11 +47,13 @@ def call(method: str, path: str, body: dict | None = None) -> dict:
         sys.exit("CLAUDE_VOICE_URL not set")
     h = {"Content-Type": "application/json"}
     if os.environ.get("CLAUDE_VOICE_TOKEN"):
+        if not creds_ok(url):
+            sys.exit("refusing to send CLAUDE_VOICE_TOKEN over plain http to a non-loopback host (use https)")
         h["Authorization"] = "Bearer " + os.environ["CLAUDE_VOICE_TOKEN"]
     req = urllib.request.Request(url.rstrip("/") + path, method=method, headers=h,
                                  data=json.dumps(body).encode() if body is not None else None)
     try:
-        with urllib.request.urlopen(req, timeout=5) as r:
+        with OPENER.open(req, timeout=5) as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
         sys.exit(f"HTTP {e.code}: {e.read().decode(errors='replace')[:200]}")

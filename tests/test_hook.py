@@ -137,3 +137,29 @@ def run_creds():
     check("hook: token + non-https remote -> silent no-op", p.returncode == 0 and dt < 1.0)
     red.shutdown()
     tgt.shutdown()
+
+
+def run_voicectl_creds():
+    seen = []
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.headers.get("Authorization"))
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:1/x")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", free_port()), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    env = {**os.environ, "CLAUDE_VOICE_TOKEN": "t" * 32, "CLAUDE_VOICE_STATE_DIR": tempfile.mkdtemp()}
+    p = subprocess.run([sys.executable, f"{ROOT}/tools/voicectl.py", "status"], capture_output=True, timeout=10,
+                       env={**env, "CLAUDE_VOICE_URL": f"http://127.0.0.1:{srv.server_address[1]}"})
+    check("voicectl: 302 not followed (HTTP error, token sent once)", p.returncode != 0 and b"302" in p.stderr and len(seen) == 1)
+    p = subprocess.run([sys.executable, f"{ROOT}/tools/voicectl.py", "status"], capture_output=True, timeout=10,
+                       env={**env, "CLAUDE_VOICE_URL": "http://10.255.255.1:9"})
+    check("voicectl: refuses token over plain http to remote host", p.returncode != 0 and b"refusing" in p.stderr and len(seen) == 1)
+    srv.shutdown()
