@@ -117,6 +117,37 @@ def run():
     git(d, "checkout", "-q", "-b", "dev")
     p, st = sh(d, "--session-start", ref="v2")
     check("branch checkout is never touched", st == ["skip:branch_checkout"] and git(d, "rev-parse", "--abbrev-ref", "HEAD") == "dev")
+    p, _ = sh(d, "update", ref="v2")
+    check("branch skip names the real branch", "'dev'" in p.stdout and "development" not in p.stdout)
+
+    # checkout created by the setup script on a branch (older setup without ref): marker makes it updatable
+    d = clone()
+    git(d, "checkout", "-q", "-b", "main")
+    open(os.path.join(d, ".git", "claude-voice-managed"), "w").close()
+    p, st = sh(d, "--session-start", ref="v2")
+    check("managed branch checkout is updated (and detached)", st == ["updated"] and head(d) == "v2"
+          and git(d, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD")
+
+    # plugin dir inside another repo but not a checkout itself: never walk up into the parent repo
+    outer = os.path.join(tmp, "outer")
+    subprocess.run(["git", "init", "-q", "-b", "development", outer], check=True, env=GIT_ENV)
+    inner = os.path.join(outer, "plugin")
+    shutil.copytree(clone(), inner, ignore=shutil.ignore_patterns(".git"))
+    p, st = sh(inner, "--session-start", ref="v2")
+    check("plugin dir not the root of its own checkout -> skip:not_own_repo", st == ["skip:not_own_repo"])
+    p, _ = sh(inner, "update", extra={"CLAUDE_PLUGIN_ROOT": clone()}, ref="v2")
+    check("CLAUDE_PLUGIN_ROOT of another dir is ignored", "not the root of its own git checkout" in p.stdout)
+
+    # setup script: ref from first argument, detached checkout, managed marker
+    home = tempfile.mkdtemp()
+    p = subprocess.run(["bash", f"{ROOT}/deploy/cloud-env-setup.sh", "v2"], capture_output=True, text=True, timeout=120,
+                       env={"PATH": os.environ["PATH"], "HOME": home, "CLAUDE_VOICE_REPO": url, **{k: GIT_ENV[k] for k in GIT_ENV if k.startswith("GIT_")}})
+    sd = os.path.join(home, ".claude-plugins", "claude-voice")
+    check("setup script: arg ref, detached, managed marker", p.returncode == 0 and head(sd) == "v2"
+          and git(sd, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD" and os.path.exists(os.path.join(sd, ".git", "claude-voice-managed")))
+    p = subprocess.run(["bash", f"{ROOT}/deploy/cloud-env-setup.sh", "-x"], capture_output=True, text=True, timeout=60,
+                       env={"PATH": os.environ["PATH"], "HOME": tempfile.mkdtemp()})
+    check("setup script: invalid ref -> skipped, exit 0", p.returncode == 0 and "invalid ref" in p.stdout)
 
     d = clone()
     open(f"{d}/hooks/speak.py", "a").write("# local edit\n")

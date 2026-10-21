@@ -24,7 +24,9 @@ import time
 STATE_DIR = os.path.expanduser(os.environ.get("CLAUDE_VOICE_STATE_DIR", "~/.claude-voice"))
 LEVELS = {"off": 0, "error": 1, "warn": 2, "info": 3, "debug": 4}
 LOG_MAX_BYTES = 256 * 1024
-PLUGIN_DIR = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Always derived from this file: CLAUDE_PLUGIN_ROOT may belong to another plugin in some contexts.
+PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MANAGED_MARKER = "claude-voice-managed"   # written into .git by deploy/cloud-env-setup.sh
 TOTAL_TIMEOUT_S = 60
 LOCK_STALE_S = 120
 REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
@@ -99,14 +101,21 @@ def update(ref: str | None, auto: bool) -> tuple[str, str]:
     rc, out = g("rev-parse", "--is-inside-work-tree")
     if rc != 0 or out != "true":
         return "skip:not_git", "plugin dir is not a git checkout"
-    if g("symbolic-ref", "-q", "HEAD")[0] == 0:
-        return "skip:branch_checkout", "branch checkout (development), not touched"
+    rc, top = g("rev-parse", "--show-toplevel")
+    if rc != 0 or os.path.realpath(top) != os.path.realpath(PLUGIN_DIR):
+        return "skip:not_own_repo", "plugin dir is not the root of its own git checkout"
+    rc, gitdir = g("rev-parse", "--absolute-git-dir")
+    if rc != 0 or not gitdir:
+        return "skip:not_git", "cannot resolve git dir"
+    managed = os.path.exists(os.path.join(gitdir, MANAGED_MARKER))
+    rc, branch = g("symbolic-ref", "-q", "--short", "HEAD")
+    if rc == 0 and not managed:
+        return "skip:branch_checkout", f"checkout on branch '{branch}' without setup marker (developer checkout), not touched"
     rc, out = g("status", "--porcelain", "--untracked-files=no")
     if rc != 0 or out:
         return "skip:dirty", "local modifications"
-    rc, gitdir = g("rev-parse", "--absolute-git-dir")
     lock = os.path.join(gitdir, "claude-voice-update.lock")
-    if rc != 0 or not acquire_lock(lock):
+    if not acquire_lock(lock):
         return "skip:locked", "another update is running"
     try:
         head = g("rev-parse", "HEAD")[1]

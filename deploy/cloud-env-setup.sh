@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # claude-voice: setup script for a claude.ai cloud environment (e.g. "GDev").
 #
-# Paste into the environment's "Setup script" field (or `curl … | bash` it from there).
+# Paste into the environment's "Setup script" field, or pin a release in one line:
+#   curl -fsSL https://raw.githubusercontent.com/HearthCore/claude-voice/<tag>/deploy/cloud-env-setup.sh | bash -s -- <tag> || true
+# The ref is taken from the first argument, else CLAUDE_VOICE_REF, else main. Pass it as argument:
+# environment variables are not reliably visible to setup scripts.
 # Runs as root before Claude Code starts. It is idempotent and NEVER fails the session:
 # every error is logged and the script exits 0.
 #
@@ -22,7 +25,7 @@
 # No `set -e/-u`: an unbound variable would abort the shell and with it the session start.
 
 REPO="${CLAUDE_VOICE_REPO:-https://github.com/HearthCore/claude-voice.git}"
-REF="${CLAUDE_VOICE_REF:-main}"
+REF="${1:-${CLAUDE_VOICE_REF:-main}}"
 DIR="${CLAUDE_VOICE_PLUGIN_DIR:-$HOME/.claude-plugins/claude-voice}"
 
 log() { echo "[claude-voice-setup] $*"; }
@@ -42,6 +45,9 @@ git_auth() {
 }
 
 main() {
+  case "$REF" in
+    ""|-*|*..*|*[!A-Za-z0-9._/-]*) log "invalid ref '$REF', skipping"; return 0 ;;
+  esac
   command -v git >/dev/null || { log "git missing, skipping"; return 0; }
   command -v python3 >/dev/null || log "warning: python3 missing, the hook will be a no-op"
   mkdir -p "$(dirname "$DIR")" || return 0
@@ -60,6 +66,8 @@ main() {
     if to 90 bash -c "$(declare -f git_auth); $(declare -p REF REPO tmp); \
          git_auth clone -q --depth 1 --branch \"\$REF\" \"\$REPO\" \"\$tmp/repo\""; then
       mv "$tmp/repo" "$DIR"
+      # always detached: in-session self-updates move a detached checkout between tags
+      git -C "$DIR" checkout -q --detach 2>/dev/null || true
     else
       log "clone failed (private repo without CLAUDE_VOICE_GH_TOKEN? network?)"
     fi
@@ -67,6 +75,9 @@ main() {
     [ -d "$DIR" ] || return 0
   fi
 
+  # Marks the checkout as managed by this script, so hooks/self_update.py may update it
+  # (developer checkouts without the marker are never touched).
+  : > "$DIR/.git/claude-voice-managed" 2>/dev/null || true
   # Hook runs as the session user; make sure it can read the checkout.
   chmod -R a+rX "$DIR" 2>/dev/null || true
   [ -f "$DIR/hooks/speak.py" ] && log "ok: $(git -C "$DIR" log -1 --format='%h %s' 2>/dev/null)"

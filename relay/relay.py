@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
-VERSION = "0.1.6"
+VERSION = "0.1.7"
 KEEPALIVE_S = 15
 MAX_BODY = 64 * 1024
 MAX_TEXT = 4000
