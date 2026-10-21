@@ -234,3 +234,96 @@ def run_voicectl_creds():
                        env={**env, "CLAUDE_VOICE_URL": "http://10.255.255.1:9"})
     check("voicectl: refuses token over plain http to remote host", p.returncode != 0 and b"refusing" in p.stderr and len(seen) == 1)
     srv.shutdown()
+
+
+def run_round5():
+    posts = []
+
+    class Cap(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            posts.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    cap = http.server.ThreadingHTTPServer(("127.0.0.1", free_port()), Cap)
+    threading.Thread(target=cap.serve_forever, daemon=True).start()
+
+    # --- ancestry walker on a fake /proc
+    def tree(procs):
+        root = tempfile.mkdtemp()
+        for pid, (ppid, comm, cmd) in procs.items():
+            d = os.path.join(root, str(pid))
+            os.makedirs(d)
+            open(os.path.join(d, "status"), "w").write(f"Name:\t{comm}\nPPid:\t{ppid}\n")
+            open(os.path.join(d, "comm"), "w").write(comm + "\n")
+            open(os.path.join(d, "cmdline"), "wb").write(b"\0".join(c.encode() for c in cmd) + b"\0")
+        return root
+
+    old = speak.PROC
+    try:
+        cases = {
+            "no claude ancestor": ({10: (11, "bash", ["bash"]), 11: (1, "systemd", ["systemd"])}, False),
+            "single claude behind a shell": ({9: (10, "sh", ["sh", "-c", "x"]), 10: (11, "claude", ["claude"]), 11: (1, "zsh", ["zsh"])}, False),
+            "claude grandparent (comm)": ({10: (11, "claude", ["claude", "-p"]), 11: (12, "claude", ["claude"]), 12: (1, "zsh", ["zsh"])}, True),
+            "claude behind sh, nested": ({9: (10, "sh", ["sh"]), 10: (11, "claude", ["claude"]), 11: (12, "bash", ["bash"]), 12: (13, "claude", ["claude"]), 13: (1, "zsh", ["zsh"])}, True),
+            "node-based claude via cmdline": ({10: (11, "node", ["node", "/a/@anthropic-ai/claude-code/cli.js"]),
+                                               11: (1, "node", ["node", "/b/node_modules/@anthropic-ai/claude-code/cli.js", "-p"])}, True),
+            "argv0 basename claude": ({10: (11, "x", ["/usr/bin/claude"]), 11: (12, "y", ["/opt/bin/claude", "-p"]), 12: (1, "z", ["z"])}, True),
+            "cycle": ({10: (11, "claude", ["claude"]), 11: (10, "claude", ["claude"])}, False),
+            "broken status": ({10: (11, "claude", ["claude"])}, False),
+        }
+        for name, (procs, want) in cases.items():
+            speak.PROC = tree(procs)
+            if name == "broken status":
+                open(os.path.join(speak.PROC, "10", "status"), "w").write("garbage\n")
+            check(f"nested walker: {name} -> {want}", speak.nested_claude(10 if name != "single claude behind a shell" and name != "claude behind sh, nested" else 9) is want)
+        speak.PROC = "/nonexistent-proc"
+        check("nested walker: missing /proc -> False", speak.nested_claude(10) is False)
+    finally:
+        speak.PROC = old
+
+    # --- end to end: two processes named claude above the hook
+    tmp = tempfile.mkdtemp()
+    claude = os.path.join(tmp, "claude")
+    os.symlink(os.path.realpath(sys.executable), claude)
+    inner = ("import subprocess,sys,os;subprocess.run([sys.executable,%r],input=os.environ['PAYLOAD'].encode())" % f"{ROOT}/hooks/speak.py")
+    outer = "import subprocess,sys,os;subprocess.run([%r,'-c',%r])" % (claude, inner)
+    base = {**os.environ, "CLAUDE_VOICE_URL": f"http://127.0.0.1:{cap.server_address[1]}", "CLAUDE_VOICE_LOG_LEVEL": "info",
+            "CLAUDE_VOICE_STATE_DIR": tempfile.mkdtemp(), "PAYLOAD": json.dumps({"hook_event_name": "Stop", "session_id": "n", "last_assistant_message": "Hilfssession."})}
+    base.pop("CLAUDE_VOICE_NESTED", None)
+    base.pop("CLAUDE_PID", None)
+    subprocess.run([claude, "-c", outer], env=base, timeout=20)
+    time.sleep(0.8)
+    logtxt = open(os.path.join(base["CLAUDE_VOICE_STATE_DIR"], "hook.log"), encoding="utf-8").read()
+    check("nested helper claude: nothing sent, skip:nested logged", posts == [] and "skip:nested" in logtxt and "Hilfssession" not in logtxt)
+    subprocess.run([claude, "-c", outer], env={**base, "CLAUDE_VOICE_NESTED": "speak"}, timeout=20)
+    check("CLAUDE_VOICE_NESTED=speak speaks anyway", wait_for(lambda: len(posts) == 1))
+
+    # --- notification allowlist
+    def notif(extra, types):
+        n0 = len(posts)
+        env = {**os.environ, "CLAUDE_VOICE_URL": base["CLAUDE_VOICE_URL"], "CLAUDE_VOICE_STATE_DIR": tempfile.mkdtemp()}
+        if types is not None:
+            env["CLAUDE_VOICE_NOTIFY_TYPES"] = types
+        run_hook({"hook_event_name": "Notification", "message": "Bitte bestaetigen.", **extra}, env)
+        time.sleep(0.7)
+        return len(posts) > n0
+
+    d = speak.DEFAULT_NOTIFY_TYPES
+    check("notify default: permission_prompt spoken", notif({"notification_type": "permission_prompt"}, d))
+    check("notify default: idle_prompt skipped", not notif({"notification_type": "idle_prompt"}, d))
+    check("notify default: missing type skipped", not notif({}, d))
+    check("notify all: everything incl. missing type", notif({"notification_type": "idle_prompt"}, "all") and notif({}, "all"))
+    check("notify none: nothing", not notif({"notification_type": "permission_prompt"}, "none"))
+    check("notify custom list", notif({"notification_type": "idle_prompt"}, "idle_prompt, auth_success"))
+
+    # --- tagged context blocks
+    c = speak.clean("<openviking-context>\nGeheime Erinnerung. Mehr.\n</openviking-context> Das ist der Satz.", 500)
+    check("hyphenated context blocks dropped incl. content", c == "Das ist der Satz.")
+    c = speak.clean("<system-reminder foo=\"1\">weg</system-reminder>Bleibt. a < b > c und <b>fett</b>", 500)
+    check("plain angle brackets / simple tags survive", c.startswith("Bleibt.") and "weg" not in c and "a" in c and "fett" in c)
+    cap.shutdown()

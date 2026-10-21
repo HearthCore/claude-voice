@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 KEEPALIVE_S = 15
 MAX_BODY = 64 * 1024
 MAX_TEXT = 4000
@@ -306,6 +306,8 @@ def make_handler(state: State, tokens: list[str], no_auth: bool, base_path: str 
 
         def log_message(self, fmt, *args):  # never log headers/tokens
             msg = (fmt % args).encode("unicode_escape").decode("ascii")   # no control chars in logs
+            if fmt.startswith("Request timed out"):   # idle keep-alive closed by the 30 s socket timeout
+                return log(f"{self.client_address[0]} {msg}", "debug")
             try:
                 bad = int(args[1]) >= 400
             except (IndexError, ValueError, TypeError):

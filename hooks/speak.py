@@ -6,6 +6,10 @@ Env: CLAUDE_VOICE_URL, CLAUDE_VOICE_TOKEN, CLAUDE_VOICE_TARGET (default: relay r
      CLAUDE_VOICE_MAX_CHARS (default 500), CLAUDE_VOICE_TIMEOUT (default 2), CLAUDE_VOICE_RETRIES (default 1)
      CLAUDE_VOICE_STOP_MODE=final|all (default final): "final" skips a Stop while a background subagent is still
      running (interim message; the real final Stop follows). Running background shells do not suppress.
+     CLAUDE_VOICE_NESTED=skip|speak (default skip): hooks of nested helper sessions (a `claude` process below another
+     `claude`, found via /proc ancestry; e.g. `claude -p` spawned by another plugin) never speak.
+     CLAUDE_VOICE_NOTIFY_TYPES (default permission_prompt,elicitation_dialog,agent_needs_input; "all" | "none"):
+     Notification types that are spoken.
      CLAUDE_VOICE_LOG_LEVEL=off|error|warn|info|debug (default off): JSON lines appended to
      $CLAUDE_VOICE_STATE_DIR/hook.log (0600, rotated at 256 KiB to hook.log.1). info = decision + metadata + char
      count; debug adds raw/cleaned text and the posted payload. Local file only; token is never logged.
@@ -51,6 +55,60 @@ def _write(level: str, event: str, **fields) -> None:
     fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+PROC = "/proc"
+DEFAULT_NOTIFY_TYPES = "permission_prompt,elicitation_dialog,agent_needs_input"
+
+
+def _proc_read(pid: int, name: str) -> bytes:
+    with open(f"{PROC}/{pid}/{name}", "rb") as f:
+        return f.read()
+
+
+def _ppid(pid: int) -> int:
+    m = re.search(rb"^PPid:\s*(\d+)", _proc_read(pid, "status"), re.M)
+    return int(m.group(1)) if m else 0
+
+
+def _is_claude(pid: int) -> bool:
+    if _proc_read(pid, "comm").strip() == b"claude":
+        return True
+    args = [a.decode("utf-8", "replace") for a in _proc_read(pid, "cmdline").split(b"\0") if a]
+    return bool(args) and (os.path.basename(args[0]) == "claude" or any(
+        a.endswith("/claude") or a.endswith("claude/cli.js") or "@anthropic-ai/claude-code" in a for a in args))
+
+
+def find_nested(start: int | None = None) -> tuple[int, str] | None:
+    """(depth, comm) of a claude process above the claude that runs this hook, else None. Linux /proc only."""
+    try:
+        pid, chain = start or os.getppid(), []
+        while pid > 1 and len(chain) < 64 and pid not in chain:
+            chain.append(pid)
+            pid = _ppid(pid)
+        if pid in chain:   # cycle: broken tree
+            return None
+        cp = os.environ.get("CLAUDE_PID", "")
+        if cp.isdigit() and int(cp) in chain:
+            chain = chain[chain.index(int(cp)):]
+        flags = []
+        for p in chain:
+            try:
+                flags.append(_is_claude(p))
+            except OSError:
+                flags.append(False)
+        if True not in flags:
+            return None
+        for i in range(flags.index(True) + 1, len(chain)):
+            if flags[i]:
+                return i, _proc_read(chain[i], "comm").strip().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def nested_claude(start: int | None = None) -> bool:
+    return find_nested(start) is not None
 
 
 def running_subagents(data: dict) -> list:
@@ -129,7 +187,8 @@ def last_assistant_text(path: str) -> str:
 
 
 def clean(text: str, max_chars: int) -> str:
-    t = re.sub(r"```.*?```", " ", text, flags=re.S)           # code blocks
+    t = re.sub(r"<([a-z][a-z0-9_-]*-[a-z0-9_-]+)(?:\s[^>]*)?>.*?</\1>", " ", text, flags=re.S)   # injected context blocks
+    t = re.sub(r"```.*?```", " ", t, flags=re.S)           # code blocks
     t = re.sub(r"`[^`]*`", " ", t)                              # inline code
     t = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", t)                 # images
     t = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", t)              # links -> label
@@ -188,6 +247,12 @@ def main() -> int:
         decide(data, "skip:local_mute")
         return 0
     event = data.get("hook_event_name", "")
+    if event in ("Stop", "Notification") and os.environ.get("CLAUDE_VOICE_NESTED", "skip").strip().lower() != "speak":
+        nested = find_nested()
+        if nested:
+            log("info", "nested", depth=nested[0], ancestor=nested[1])
+            decide(data, "skip:nested")
+            return 0
     max_chars = env_num("CLAUDE_VOICE_MAX_CHARS", "500", int)
     if event == "Stop":
         if data.get("stop_hook_active"):
@@ -201,6 +266,12 @@ def main() -> int:
             raw, source = last_assistant_text(str(data.get("transcript_path") or "")), "transcript"
         text = clean(raw, max_chars)
     elif event == "Notification":
+        allowed = os.environ.get("CLAUDE_VOICE_NOTIFY_TYPES", DEFAULT_NOTIFY_TYPES).strip().lower()
+        nt = data.get("notification_type")
+        nt = nt if isinstance(nt, str) else ""
+        if allowed == "none" or (allowed != "all" and nt.lower() not in {x.strip() for x in allowed.split(",")}):
+            decide(data, f"skip:notify_type:{nt}")
+            return 0
         raw, source = str(data.get("message", "")), "message"
         text = clean(raw, max_chars)
     else:

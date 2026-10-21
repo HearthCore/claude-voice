@@ -230,12 +230,14 @@ home = ["a", "b"]
     test_relay.run()
     test_relay.run_base_path()
     test_relay.run_hardening()
+    test_relay.run_idle_timeout()
     import test_sidecar
     test_sidecar.run()
     import test_hook
     test_hook.run()
     test_hook.run_creds()
     test_hook.run_voicectl_creds()
+    test_hook.run_round5()
     import test_logging
     test_logging.run()
     print(f"\n{len(PASSED)} checks passed")

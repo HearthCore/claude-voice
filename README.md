@@ -110,6 +110,8 @@ Stop: spricht bevorzugt `last_assistant_message` (Transcript nur Fallback); Noti
 | `CLAUDE_VOICE_TIMEOUT` / `_RETRIES` | `2` / `1` | HTTP-Timeout (s) / Wiederholungen |
 | `CLAUDE_VOICE_STATE_DIR` | `~/.claude-voice` | lokale Mute-Flags |
 | `CLAUDE_VOICE_SYNC` | – | Debug: ohne fork/setsid, synchron |
+| `CLAUDE_VOICE_NESTED` | `skip` | `skip`: Hooks verschachtelter Hilfs-Sessions (ein `claude` unterhalb eines anderen `claude`, z. B. `claude -p` aus dem Hook eines anderen Plugins; Erkennung über /proc-Abstammung, nur Linux) sprechen nie; `speak`: immer |
+| `CLAUDE_VOICE_NOTIFY_TYPES` | `permission_prompt,elicitation_dialog,agent_needs_input` | Notification-Typen, die gesprochen werden; `all` = alle (auch ohne Typ), `none` = keine |
 | `CLAUDE_VOICE_STOP_MODE` | `final` | `final`: Stop-Zwischenmeldungen bei laufenden Hintergrund-Subagents (`background_tasks`) nicht sprechen; `all`: jedes Stop sprechen |
 | `CLAUDE_VOICE_LOG_LEVEL` | `off` | `off\|error\|warn\|info\|debug`; JSON-Zeilen in `$CLAUDE_VOICE_STATE_DIR/hook.log` (0600, Rotation bei 256 KiB → `hook.log.1`) |
 
@@ -151,7 +153,7 @@ Tokens, Keys und Extra-Header gehen nie über Klartext-http an Nicht-Loopback-Ho
 ## Tests
 
 ```bash
-python3 tests/smoke.py      # 159 Checks: tests/test_relay.py, test_sidecar.py, test_hook.py, test_logging.py
+python3 tests/smoke.py      # 179 Checks: tests/test_relay.py, test_sidecar.py, test_hook.py, test_logging.py
 ```
 
 Fake-TTS, tee-/Stub-Player, freie Ports; kein Netzwerk nötig. Repo-Agents: `.claude/agents/reviewer.md` (read-only), `scout.md` (haiku, read-only).

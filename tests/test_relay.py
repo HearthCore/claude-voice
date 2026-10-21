@@ -241,3 +241,25 @@ def run_hardening():
     finally:
         srv.shutdown()
         relay.KEEPALIVE_S = 15
+
+
+def run_idle_timeout():
+    import contextlib
+    import io
+    st = relay.State({"devices": {"a": {}}, "groups": {}})
+    H = relay.make_handler(st, [TOKEN], False)
+    H.timeout = 1
+    srv = relay.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            sk = socket.create_connection(("127.0.0.1", srv.server_address[1]), timeout=3)
+            sk.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+            sk.recv(500)
+            time.sleep(1.6)
+            sk.close()
+    finally:
+        srv.shutdown()
+    check("idle keep-alive timeout not logged at info", "timed out" not in buf.getvalue() and '"GET /healthz' in buf.getvalue())

@@ -80,6 +80,8 @@ Alle Pfade zusätzlich unter `CLAUDE_VOICE_BASE_PATH` (Produktion `/speak`, z. B
 | Base-Path | im Relay (`CLAUDE_VOICE_BASE_PATH`) statt Proxy-Rewrite | kein Rewrite-Setup in Pangolin, Pfad-Traversal wird im Relay strikt behandelt |
 | Cloud-Aktivierung | `CLAUDE_CODE_PLUGIN_DIRS` | Marketplace-Einträge aus `.claude/settings.json` greifen in Cloud-Sessions nicht |
 | Cloud-Token | bevorzugt Network Secret für die Relay-Domain (`Authorization: Bearer`), alternativ Env `CLAUDE_VOICE_TOKEN` | Network Secret: Token gelangt nie in die VM |
+| Hilfs-Sessions | Verschachtelte Hilfs-Sessions anderer Plugins (`claude -p` aus Hooks) werden über die Prozess-Abstammung (/proc) erkannt und nicht gesprochen (`CLAUDE_VOICE_NESTED`) | Env-Variablen unterscheiden Top-Level- und Hilfs-`claude -p` nicht; die Abstammung schon (gemessen) |
+| Notifications | Nur Typen, die den Nutzer brauchen (`permission_prompt`, `elicitation_dialog`, `agent_needs_input`), `CLAUDE_VOICE_NOTIFY_TYPES` | Kein Vorlesen von Idle-/Status-Meldungen |
 | Zwischenmeldungen | Stop bei laufenden Hintergrund-Subagents wird standardmäßig nicht gesprochen (`background_tasks` im Stop-Input, gemessen); `CLAUDE_VOICE_STOP_MODE=all` spricht alles. Tool-Aufruf-Zusammenfassungen: Roadmap | Claude beendet den Turn mit Zwischenstand und wird später geweckt; nur das finale Stop soll vorgelesen werden |
 | Cloud-Hook | fork + `setsid`, fd 0–2 auf `/dev/null`, `async: true` | sonst wartet Claude Code auf Pipes (5,26 s statt 0,05 s) |
 

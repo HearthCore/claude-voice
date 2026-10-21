@@ -10,6 +10,9 @@ import urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOKEN = "t" * 32
 PASSED = []
+# test processes may run under a real claude; hooks must still speak and notifications must pass
+os.environ.setdefault("CLAUDE_VOICE_NESTED", "speak")
+os.environ.setdefault("CLAUDE_VOICE_NOTIFY_TYPES", "all")
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
