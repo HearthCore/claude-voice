@@ -225,6 +225,8 @@ home = ["a", "b"]
                 p.kill()
     import test_relay
     test_relay.run()
+    import test_sidecar
+    test_sidecar.run()
     print(f"\n{len(PASSED)} checks passed")
 
 
