@@ -5,6 +5,9 @@ Env:
   CLAUDE_VOICE_URL, CLAUDE_VOICE_TOKEN   relay (token optional only with LOCAL_UNSAFE_NO_AUTH relay)
   CLAUDE_VOICE_DEVICE                    device name as in relay config (required)
   TTS_URL   (default http://127.0.0.1:8880/v1)   TTS_KEY   TTS_MODEL (kokoro)   TTS_VOICE (af_heart)
+  CLAUDE_VOICE_LOG_LEVEL     off|error|warn|info|debug (default info). info logs ids/status/char counts only;
+                             debug also logs message text, TTS request/response timing, player argv. The relay
+                             token, TTS_KEY and TTS_EXTRA_HEADERS values are never logged. FATAL always prints.
   TTS_FORMAT (pcm|mp3|wav|opus, default pcm)
   TTS_PCM_RATE (default 24000)  TTS_PCM_CHANNELS (default 1)   raw PCM is s16le; used when the TTS answers
                                 audio/pcm or audio/l16 (or no/non-audio content type and TTS_FORMAT=pcm)
@@ -38,15 +41,39 @@ import urllib.request
 from datetime import datetime, timezone
 
 
-def log(m: str) -> None:
-    print(f"{datetime.now().isoformat(timespec='seconds')} {m}", flush=True)
+LEVELS = {"off": 0, "error": 1, "warn": 2, "info": 3, "debug": 4}
+
+
+def parse_level(v: str | None, default: str = "info") -> tuple[int, bool]:
+    """Returns (level, valid). Empty/None is valid and means default."""
+    v = (v or "").strip().lower()
+    if not v:
+        return LEVELS[default], True
+    return (LEVELS[v], True) if v in LEVELS else (LEVELS[default], False)
+
+
+LOG_LEVEL, _LEVEL_VALID = parse_level(os.environ.get("CLAUDE_VOICE_LOG_LEVEL"))
+
+
+def safe_url(u: str) -> str:
+    return re.sub(r"//[^/@]*@", "//", u)   # drop userinfo
+
+
+def log(m: str, level: str = "info") -> None:
+    """level 'always' (FATAL / security warnings) ignores CLAUDE_VOICE_LOG_LEVEL."""
+    if level == "always" or LEVELS[level] <= LOG_LEVEL:
+        print(f"{datetime.now().isoformat(timespec='seconds')} {m}", flush=True)
+
+
+if not _LEVEL_VALID:
+    log("WARNING: invalid CLAUDE_VOICE_LOG_LEVEL, using info", "always")
 
 
 def env_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, default))
     except ValueError:
-        log(f"{name}: invalid value, using {default}")
+        log(f"{name}: invalid value, using {default}", "warn")
         return default
 
 
@@ -98,7 +125,7 @@ def parse_extra_headers(spec: str) -> dict:
         name, value = name.strip(), value.strip()
         if (not sep or not re.fullmatch(r"[A-Za-z0-9-]+", name) or name.lower() in HEADER_DENYLIST
                 or not re.fullmatch(r"[\x20-\x7e]*", value)):
-            log(f"TTS_EXTRA_HEADERS: ignoring invalid entry #{i + 1}")
+            log(f"TTS_EXTRA_HEADERS: ignoring invalid entry #{i + 1}", "warn")
             continue
         out[name] = value
     return out
@@ -185,20 +212,28 @@ def tts_open(sentence: str, deadline: float | None = None):
             time.sleep(0.3 * attempt)
         req = urllib.request.Request(TTS_URL + "/audio/speech", data=json.dumps(body).encode(), headers=h, method="POST")
         r = None
+        t0 = time.monotonic()
+        log(f"tts request url={safe_url(TTS_URL)}/audio/speech model={TTS_MODEL} voice={TTS_VOICE} format={TTS_FORMAT} "
+            f"headers={sorted(set(h) - {'Authorization'})} attempt={attempt + 1}", "debug")
         try:
             r = OPENER.open(req, timeout=30)
             first = r.read(4096)
+            log(f"tts response status={r.status} content-type={r.headers.get('Content-Type')} "
+                f"ttfb={time.monotonic() - t0:.3f}s", "debug")
             if first:
                 return r, r.headers.get("Content-Type"), first
             last = "empty response"
         except urllib.error.HTTPError as e:
             last = f"HTTP {e.code}"
+            log(f"tts response status={e.code} ttfb={time.monotonic() - t0:.3f}s", "debug")
             if e.code < 500:
                 raise TTSError(last) from None
         except (urllib.error.URLError, OSError) as e:
             last = type(e).__name__
         if r is not None:
             r.close()
+        if attempt < TTS_RETRIES:
+            log(f"tts attempt {attempt + 1} failed ({last}), retrying", "warn")
     raise TTSError(f"{last} after {TTS_RETRIES + 1} attempts")
 
 
@@ -246,6 +281,7 @@ def speak(ev: dict) -> str:
                 if stop.is_set():
                     return
                 dl = time.monotonic() + TTS_SENTENCE_DEADLINE_S
+                log(f"tts sentence: {s}", "debug")
                 r, ct, chunk = tts_open(s, dl)
                 with r:
                     if first_ct is None:
@@ -253,7 +289,7 @@ def speak(ev: dict) -> str:
                         if not put(("start", ct)):
                             return
                     elif base_type(ct) != first_ct:
-                        log(f"content-type changed ({base_type(ct)!r} vs {first_ct!r}), skipping sentence")
+                        log(f"content-type changed ({base_type(ct)!r} vs {first_ct!r}), skipping sentence", "warn")
                         continue
                     got = 0
                     while chunk:
@@ -263,6 +299,7 @@ def speak(ev: dict) -> str:
                         if time.monotonic() > dl:
                             raise TTSError("deadline exceeded")
                         chunk = r.read(4096)
+                    log(f"tts sentence done bytes={got} total={time.monotonic() - dl + TTS_SENTENCE_DEADLINE_S:.3f}s", "debug")
                     want = r.headers.get("Content-Length")
                     if want and want.isdigit() and got != int(want):   # http.client does not flag short bodies on read(n)
                         raise TTSError("truncated response")
@@ -294,9 +331,11 @@ def speak(ev: dict) -> str:
                 break
             if kind == "start":
                 try:
-                    proc = subprocess.Popen(player_cmd(val), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    cmd = player_cmd(val)
+                    log(f"player argv={cmd} content-type={val}", "debug")
+                    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except (OSError, RuntimeError) as e:
-                    log(f"player start failed: {e}")
+                    log(f"player start failed: {e}", "error")
                     return "player_error"
                 timer = threading.Timer(PLAYER_DEADLINE_S, kill)
                 timer.daemon = True
@@ -307,10 +346,10 @@ def speak(ev: dict) -> str:
             proc.stdin.close()
             proc.wait(timeout=PLAYER_DEADLINE_S)
         if timed_out.is_set():
-            log("player deadline exceeded")
+            log("player deadline exceeded", "error")
             return "player_error"
     except (OSError, ValueError, subprocess.TimeoutExpired):
-        log("player died or hung")
+        log("player died or hung", "error")
         return "player_error"
     finally:
         stop.set()
@@ -325,7 +364,7 @@ def speak(ev: dict) -> str:
                 proc.kill()
             proc.wait()
     if err:
-        log(f"tts error: {err[0]}")
+        log(f"tts error: {err[0]}", "error")
     return "tts_error" if err else "played"
 
 
@@ -341,16 +380,18 @@ def ack(evid: str, status: str) -> None:
 
 def handle(ev: dict) -> None:
     log(f"speak {ev['id']} ({len(ev['text'])} chars)")
+    log(f"event {ev['id']} text={ev['text']!r} ttl_s={ev.get('ttl_s')} expires_in_s={ev.get('expires_in_s')} "
+        f"volume={ev.get('volume')}", "debug")
     status = "expired" if is_stale(ev) else speak(ev)
     ack(ev["id"], status)
-    log(f"{ev['id']} -> {status}")
+    log(f"{ev['id']} -> {status}", "info" if status == "played" else "warn")
 
 
 def run_once() -> None:
     url = f"{RELAY}/v1/stream?device={urllib.parse.quote(DEVICE, safe='')}"
     req = urllib.request.Request(url, headers={"Accept": "text/event-stream", **auth_headers()})
     with OPENER.open(req, timeout=60) as r:   # keepalive every 15s keeps this alive
-        log(f"connected to {RELAY} as {DEVICE}")
+        log(f"connected to {safe_url(RELAY)} as {DEVICE}")
         etype, data = "", []
         for raw in r:
             line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -363,7 +404,7 @@ def run_once() -> None:
                         ev["_recv"] = time.monotonic()
                         handle(ev)
                     except Exception as e:   # one bad event must not kill the loop
-                        log(f"event error: {type(e).__name__}: {e}")
+                        log(f"event error: {type(e).__name__}: {e}", "error")
                 etype, data = "", []
             elif line.startswith("event:"):
                 etype = line[6:].strip()
@@ -379,11 +420,11 @@ def main_loop(max_runs: int | None = None) -> None:
         try:
             run_once()
         except urllib.error.HTTPError as e:
-            log(f"relay HTTP {e.code} (check token / device name)")
+            log(f"relay HTTP {e.code} (check token / device name)", "warn")
         except (urllib.error.URLError, OSError, TimeoutError) as e:
-            log(f"relay unreachable: {e}")
+            log(f"relay unreachable: {e}", "warn")
         except Exception as e:   # never die
-            log(f"stream error: {type(e).__name__}: {e}")
+            log(f"stream error: {type(e).__name__}: {e}", "error")
         if time.monotonic() - t0 >= 10:
             backoff = 1.0
         time.sleep(backoff)
@@ -392,11 +433,13 @@ def main_loop(max_runs: int | None = None) -> None:
 
 def main() -> int:
     if not DEVICE:
-        log("FATAL: CLAUDE_VOICE_DEVICE not set")
+        log("FATAL: CLAUDE_VOICE_DEVICE not set", "always")
         return 2
     if TOKEN and not creds_ok(RELAY):
-        log("FATAL: refusing to send CLAUDE_VOICE_TOKEN over plain http to a remote host (use https)")
+        log("FATAL: refusing to send CLAUDE_VOICE_TOKEN over plain http to a remote host (use https)", "always")
         return 2
+    if LOG_LEVEL == LEVELS["debug"]:
+        log("WARNING: log level debug: message text is written to the log", "always")
     main_loop()
     return 0
 

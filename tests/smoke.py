@@ -233,6 +233,8 @@ home = ["a", "b"]
     test_hook.run()
     test_hook.run_creds()
     test_hook.run_voicectl_creds()
+    import test_logging
+    test_logging.run()
     print(f"\n{len(PASSED)} checks passed")
 
 

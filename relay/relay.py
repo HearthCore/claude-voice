@@ -2,6 +2,8 @@
 """claude-voice relay: receives speak requests, fans them out to devices/groups via SSE.
 
 Stdlib only (Python >= 3.11). Auth: Bearer token(s) from CLAUDE_VOICE_TOKEN(S).
+CLAUDE_VOICE_LOG_LEVEL=off|error|warn|info|debug (default info): info logs ids/devices/status/char counts only;
+debug also logs message text. Tokens and Authorization headers are never logged. FATAL startup errors always print.
 """
 from __future__ import annotations
 
@@ -34,8 +36,22 @@ MAX_STREAMS = 64
 ACK_STATUSES = {"delivered", "played", "tts_error", "player_error", "expired", "acked"}
 
 
-def log(msg: str) -> None:
-    print(f"{datetime.now().isoformat(timespec='seconds')} {msg}", flush=True)
+LEVELS = {"off": 0, "error": 1, "warn": 2, "info": 3, "debug": 4}
+LOG_LEVEL = LEVELS["info"]
+
+
+def parse_level(v: str | None, default: str) -> tuple[int, bool]:
+    """Returns (level, valid). Empty/None is valid and means default."""
+    v = (v or "").strip().lower()
+    if not v:
+        return LEVELS[default], True
+    return (LEVELS[v], True) if v in LEVELS else (LEVELS[default], False)
+
+
+def log(msg: str, level: str = "info") -> None:
+    """level 'always' (FATAL / security warnings) ignores CLAUDE_VOICE_LOG_LEVEL."""
+    if level == "always" or LEVELS[level] <= LOG_LEVEL:
+        print(f"{datetime.now().isoformat(timespec='seconds')} {msg}", flush=True)
 
 
 def is_loopback(host: str) -> bool:
@@ -290,7 +306,11 @@ def make_handler(state: State, tokens: list[str], no_auth: bool, base_path: str 
 
         def log_message(self, fmt, *args):  # never log headers/tokens
             msg = (fmt % args).encode("unicode_escape").decode("ascii")   # no control chars in logs
-            log(f"{self.client_address[0]} {msg}")
+            try:
+                bad = int(args[1]) >= 400
+            except (IndexError, ValueError, TypeError):
+                bad = True
+            log(f"{self.client_address[0]} {msg}", "warn" if bad else "info")
 
         # -- helpers
         def _json(self, code: int, obj: dict) -> None:
@@ -354,7 +374,7 @@ def make_handler(state: State, tokens: list[str], no_auth: bool, base_path: str 
                 self._internal(e)
 
         def _internal(self, e: Exception) -> None:
-            log(f"{self.client_address[0]} internal error: {type(e).__name__}: {e}")
+            log(f"{self.client_address[0]} internal error: {type(e).__name__}: {e}", "error")
             self.close_connection = True
             if not self._streaming:
                 try:
@@ -409,17 +429,27 @@ def make_handler(state: State, tokens: list[str], no_auth: bool, base_path: str 
             try:
                 body = self._body()
                 if u.path == "/v1/speak":
-                    return self._json(202, state.speak(body))
+                    log(f"speak body={json.dumps(body, ensure_ascii=False)}", "debug")
+                    res = state.speak(body)
+                    log(f"speak target={res['target']} chars={len(str(body.get('text', '')).strip())} "
+                        + " ".join(f"{e['id']}->{e['device']}:{e['status']}" for e in res["events"]))
+                    for e in res["events"]:
+                        if e["status"].startswith("dropped"):
+                            log(f"event {e['id']} for {e['device']} {e['status']}", "warn")
+                    return self._json(202, res)
                 if u.path == "/v1/ack":
                     status = str(body.get("status", "acked"))
                     if status not in ACK_STATUSES:
                         raise ValueError("unknown ack status")
                     ok = state.ack(str(body.get("id")), str(body.get("device")), status)
+                    log(f"ack id={str(body.get('id'))[:40]} device={str(body.get('device'))[:40]} status={status} ok={ok}",
+                        "warn" if status in ("tts_error", "player_error", "expired") or not ok else "info")
                     if ok:
                         state.touch(str(body.get("device")))
                     return self._json(200 if ok else 404, {"ok": ok})
                 if u.path == "/v1/mute":
                     state.set_mute(str(body.get("scope", "")), str(body.get("id", "")), bool(body.get("muted", True)))
+                    log(f"mute scope={str(body.get('scope'))[:20]} id={str(body.get('id', ''))[:40]} muted={bool(body.get('muted', True))}")
                     return self._json(200, {"muted": state.muted_view()})
             except LookupError as e:
                 return self._json(404, {"error": str(e)})
@@ -450,7 +480,10 @@ def make_handler(state: State, tokens: list[str], no_auth: bool, base_path: str 
                 self.wfile.write(b": connected\n\n")
                 self.wfile.flush()
                 last_write = time.monotonic()
-                while not state.superseded(dev, gen):
+                while True:
+                    if state.superseded(dev, gen):
+                        log(f"device {dev} stream superseded by a newer connection", "warn")
+                        break
                     try:
                         ev = q.get(timeout=1)
                     except queue.Empty:
@@ -461,9 +494,11 @@ def make_handler(state: State, tokens: list[str], no_auth: bool, base_path: str 
                         continue
                     if state.superseded(dev, gen):
                         state.requeue(dev, ev)
+                        log(f"device {dev} stream superseded by a newer connection", "warn")
                         break
                     if time.time() > ev["_expires"]:
                         state.ack(ev["id"], dev, "expired")
+                        log(f"event {ev['id']} expired before delivery to {dev}", "warn")
                         continue
                     out = {k: v for k, v in ev.items() if not k.startswith("_")}
                     out["expires_in_s"] = round(max(0.0, ev["_expires"] - time.time()), 3)
@@ -477,6 +512,7 @@ def make_handler(state: State, tokens: list[str], no_auth: bool, base_path: str 
                     last_write = time.monotonic()
                     state.ack(ev["id"], dev, "delivered")
                     state.touch(dev)
+                    log(f"deliver {ev['id']} -> {dev} payload={json.dumps(out, ensure_ascii=False)}", "debug")
             except (OSError, ValueError):
                 pass
             finally:
@@ -501,6 +537,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int)
     a = ap.parse_args(argv)
 
+    global LOG_LEVEL
+    LOG_LEVEL, valid = parse_level(os.environ.get("CLAUDE_VOICE_LOG_LEVEL"), "info")
+    if not valid:
+        log("WARNING: invalid CLAUDE_VOICE_LOG_LEVEL, using info", "always")
+    if LOG_LEVEL == LEVELS["debug"]:
+        log("WARNING: log level debug: message text is written to the log", "always")
     cfg = load_config(a.config)
     host = a.host or os.environ.get("CLAUDE_VOICE_HOST") or cfg.get("server", {}).get("host", "127.0.0.1")
     port = a.port or int(os.environ.get("CLAUDE_VOICE_PORT") or cfg.get("server", {}).get("port", 8787))
@@ -511,14 +553,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if no_auth:
         if not is_loopback(host):
-            log(f"FATAL: LOCAL_UNSAFE_NO_AUTH=true is only allowed on loopback (host={host!r})")
+            log(f"FATAL: LOCAL_UNSAFE_NO_AUTH=true is only allowed on loopback (host={host!r})", "always")
             return 2
-        log("WARNING: running WITHOUT authentication (loopback only)")
+        log("WARNING: running WITHOUT authentication (loopback only)", "always")
     elif not tokens:
-        log("FATAL: no CLAUDE_VOICE_TOKEN set. Set a token, or LOCAL_UNSAFE_NO_AUTH=true on 127.0.0.1.")
+        log("FATAL: no CLAUDE_VOICE_TOKEN set. Set a token, or LOCAL_UNSAFE_NO_AUTH=true on 127.0.0.1.", "always")
         return 2
     elif any(len(t) < 16 for t in tokens):
-        log("FATAL: token too short (min 16 chars)")
+        log("FATAL: token too short (min 16 chars)", "always")
         return 2
 
     state = State(cfg)
